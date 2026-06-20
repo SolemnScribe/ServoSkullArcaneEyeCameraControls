@@ -84,6 +84,7 @@ foreach ($t in $targets) {
     Copy-Item "$dev\$($t.InfoFile)"    "$stage\Info.json"
     Copy-Item "$dev\$($t.ReadmeFile)"  "$stage\README.md"
     Copy-Item "$dev\LICENSE"           $stage
+    Copy-Item "$dev\Localization"      $stage -Recurse          # bundled UI translations (en + 10 languages)
 
     $mainZip = "$dev\$($t.Base)-$ver.zip"
     Remove-Item $mainZip -Force -ErrorAction SilentlyContinue
@@ -96,6 +97,7 @@ foreach ($t in $targets) {
     Copy-Item "$dev\$($t.InfoFile)"    "$srcStage\Info.json"
     Copy-Item "$dev\$($t.ReadmeFile)"  "$srcStage\README.md"
     Copy-Item "$dev\LICENSE"           $srcStage
+    Copy-Item "$dev\Localization"      $srcStage -Recurse       # ship the locale files with the source too
     Copy-Item $PSCommandPath           "$srcStage\build-and-package.ps1"
 
     # Genericize the machine-specific paths and set the output assembly name so a from-source build

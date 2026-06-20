@@ -195,6 +195,22 @@ live-tunable in the panel and saved across sessions.
 The in-panel *Reset pitch & zoom* button returns the pitch band to 5-89° and the zoom to a
 neutral 1x out / 4x in; it leaves near and far clip, the focus offset, and saved presets alone.
 
+## Languages
+
+The settings panel follows the game's language automatically. It ships with English plus
+French, Italian, German, Spanish, Simplified Chinese, Japanese, Korean, Russian, Ukrainian and
+Brazilian Portuguese. On load the mod reads the game's current language and loads the matching
+file from its `Localization` folder; anything a translation hasn't covered falls back to English,
+and a language with no bundled file simply shows English. The detected language is noted in the
+UnityModManager log.
+
+The non-English files are **machine-generated first drafts** and haven't had a native pass yet -
+the camera jargon especially (pivot, shoulder, dolly, mouselook, clip planes) may read awkwardly.
+Corrections are very welcome: each string lives in `Localization/<code>.json` keyed by its English
+text, so you can copy `en.json`, translate the values, and post it on the mod page or send it my
+way. Nothing in a translation can break the panel - a missing or malformed entry just falls back
+to English.
+
 ## Build
 
 Requires the .NET SDK. From the project folder:
@@ -235,4 +251,5 @@ changes.
 
 - **SolemnScribe** - author.
 - Built on **UnityModManager** and **Harmony** (0Harmony).
+- UI translations - initial machine-generated drafts; native/community corrections welcome.
 - Developed with AI assistance (see above).

@@ -47,6 +47,10 @@
       <HintPath>$(Managed)\UnityEngine.UIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(Managed)\Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="0Harmony">
       <HintPath>$(Managed)\0Harmony.dll</HintPath>
       <Private>false</Private>

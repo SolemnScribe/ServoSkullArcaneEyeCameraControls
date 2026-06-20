@@ -82,10 +82,144 @@ namespace ServoSkullCameraControls
             => UnityModManager.ModSettings.Save(this, modEntry);
     }
 
+    // ----------------------------------------------------------------------------------------------------
+    // Localization. ToyBox-style: per-locale JSON in a Localization\ folder beside the mod, each file
+    //   { "LanguageCode": "..", "Strings": { "<English source>": "<translation>", ... } }
+    // The code wraps user-facing strings in Main.L("..."); the lookup keys on the English source and falls
+    // back to it, so a missing file or key just shows English and can never break the panel. The active
+    // language follows the game: we read the game's current locale by reflection
+    // (LocalizationManager(.Instance).CurrentPack.Locale) and map it to one of our files. English needs no
+    // file - its keys are already English. The Locale type lives in an assembly we don't reference, so the
+    // reflection is defensive: any miss falls back to the OS language, then English. The detected locale
+    // and chosen file are logged so the detection can be confirmed in-game.
+    public static class Localization
+    {
+        static Dictionary<string, string> _strings;     // active translations; null => show English
+        public static string ActiveCode = "en";
+
+        public static void Init(UnityModManager.ModEntry modEntry)
+        {
+            try
+            {
+                string raw = DetectGameLocale();                 // e.g. "frFR", or null
+                string sys = SafeSystemLanguage();
+                ActiveCode = MapToFile(raw ?? sys);
+                string note;
+                if (ActiveCode == "en")
+                {
+                    _strings = null;                              // English: keys are already English
+                    note = "English (no file needed)";
+                }
+                else
+                {
+                    string path = System.IO.Path.Combine(System.IO.Path.Combine(modEntry.Path, "Localization"), ActiveCode + ".json");
+                    if (System.IO.File.Exists(path))
+                    {
+                        _strings = LoadStrings(path);
+                        note = _strings.Count + " strings from " + ActiveCode + ".json";
+                    }
+                    else
+                    {
+                        _strings = null;
+                        note = ActiveCode + ".json not present - showing English";
+                    }
+                }
+                modEntry.Logger.Log("Localization: game locale '" + (raw ?? "(none)") + "', system '" + sys
+                                    + "' -> file '" + ActiveCode + "' (" + note + ").");
+            }
+            catch (Exception e)
+            {
+                _strings = null; ActiveCode = "en";
+                modEntry.Logger.Error("Localization init failed (showing English): " + e);
+            }
+        }
+
+        // Look up the translation for an English source string, or return the English unchanged.
+        public static string Get(string english)
+        {
+            if (_strings != null && english != null && _strings.TryGetValue(english, out var t) && !string.IsNullOrEmpty(t))
+                return t;
+            return english;
+        }
+
+        static Dictionary<string, string> LoadStrings(string path)
+        {
+            var map = new Dictionary<string, string>();
+            var root = Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(path));
+            if (root["Strings"] is Newtonsoft.Json.Linq.JObject strings)
+                foreach (var kv in strings)
+                    map[kv.Key] = (string)kv.Value;
+            return map;
+        }
+
+        // Read the game's current locale by reflection: LocalizationManager(.Instance).CurrentPack.Locale,
+        // trying a few shapes. Returns the enum's name (e.g. "frFR") or null. Traverse.GetValue is null-safe,
+        // so a missing member just yields null and we move on.
+        static string DetectGameLocale()
+        {
+            var lm = AccessTools.TypeByName("Kingmaker.Localization.LocalizationManager");
+            if (lm == null) return null;
+            var chains = new[]
+            {
+                new[] { "CurrentLocale" },
+                new[] { "CurrentPack", "Locale" },
+                new[] { "Instance", "CurrentPack", "Locale" },
+                new[] { "Instance", "CurrentLocale" },
+            };
+            foreach (var chain in chains)
+            {
+                try
+                {
+                    var tr = Traverse.Create(lm);
+                    object val = null;
+                    foreach (var member in chain)
+                    {
+                        var step = tr.Property(member);
+                        val = step.GetValue();
+                        if (val == null) { step = tr.Field(member); val = step.GetValue(); }
+                        if (val == null) break;
+                        tr = Traverse.Create(val);
+                    }
+                    if (val != null) return val.ToString();
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        static string SafeSystemLanguage()
+        {
+            try { return Application.systemLanguage.ToString(); } catch { return "English"; }
+        }
+
+        // Map an Owlcat Locale enum name (frFR, deDE, zhCN, jaJP, ptBR, enGB, ...) OR a Unity SystemLanguage
+        // name (French, German, ChineseSimplified, ...) to one of our shipped files. We carry Simplified
+        // Chinese and Brazilian Portuguese, so any Chinese/Portuguese maps to those.
+        static string MapToFile(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "en";
+            s = s.ToLowerInvariant();
+            if (s.Contains("zh") || s.Contains("chin")) return "zh-CN";
+            if (s.StartsWith("ja") || s.Contains("japan")) return "ja";
+            if (s.StartsWith("pt") || s.Contains("portu") || s.Contains("brazil")) return "pt-BR";
+            if (s.StartsWith("fr") || s.Contains("french")) return "fr";
+            if (s.StartsWith("it") || s.Contains("ital")) return "it";
+            if (s.StartsWith("de") || s.Contains("german") || s.Contains("deutsch")) return "de";
+            if (s.StartsWith("es") || s.Contains("span")) return "es";
+            if (s.StartsWith("ko") || s.Contains("korea")) return "ko";
+            if (s.StartsWith("ru") || s.Contains("russ")) return "ru";
+            if (s.StartsWith("uk") || s.Contains("ukrain")) return "uk";
+            return "en";
+        }
+    }
+
     public static class Main
     {
         public static Settings settings;
         public static UnityModManager.ModEntry.ModLogger Log;
+
+        // Localize a user-facing string (returns the English unchanged if there's no active translation).
+        internal static string L(string s) => Localization.Get(s);
         public static UnityModManager.ModEntry ModEntry;
         public static Harmony HarmonyInst;
         public static bool Active = true;
@@ -185,6 +319,7 @@ namespace ServoSkullCameraControls
             ModEntry = modEntry;
             Log = modEntry.Logger;
             settings = UnityModManager.ModSettings.Load<Settings>(modEntry);
+            Localization.Init(modEntry);   // pick the language file matching the game's current locale
 
             HarmonyInst = new Harmony(modEntry.Info.Id);
             HarmonyInst.PatchAll(Assembly.GetExecutingAssembly());
@@ -598,102 +733,100 @@ namespace ServoSkullCameraControls
             {
                 var warnPrev = GUI.color;
                 GUI.color = new Color(1f, 0.55f, 0.2f);
-                GUILayout.Label("\u26a0  ToyBox: \"Ctrl + Mouse3 Drag To Adjust Camera Elevation\" is ON \u2013 it makes the camera load at a map origin and pan from there. Turn it off in ToyBox \u2192 Camera. (The Mouse3-aim option is fine to keep; pitch needs it.)");
+                GUILayout.Label(L("\u26a0  ToyBox: \"Ctrl + Mouse3 Drag To Adjust Camera Elevation\" is ON \u2013 it makes the camera load at a map origin and pan from there. Turn it off in ToyBox \u2192 Camera. (The Mouse3-aim option is fine to keep; pitch needs it.)"));
                 GUI.color = warnPrev;
                 GUILayout.Space(8f);
             }
 
             // --- Presets (cross-view) ---
-            GUILayout.Label("Camera presets  \u2013 two saved framings, alternated with one key. Each view's own controls live in its block below; facing is never stored.");
+            GUILayout.Label(L("Camera presets:"));
             GUILayout.BeginHorizontal();
-            GUILayout.Label("     Toggle key:", GUILayout.Width(150f));
+            GUILayout.Label("     " + L("Toggle key:"), GUILayout.Width(150f));
             GUILayout.Label(KeyName(settings.ToggleKey), GUILayout.Width(110f));
-            if (GUILayout.Button(_bindingTarget == 3 ? "press a key\u2026" : "Bind", GUILayout.Width(110f))) _bindingTarget = 3;
+            if (GUILayout.Button(_bindingTarget == 3 ? L("press a key\u2026") : L("Bind"), GUILayout.Width(110f))) _bindingTarget = 3;
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
-            GUILayout.Label("     Gamepad toggle:", GUILayout.Width(150f));
+            GUILayout.Label("     " + L("Gamepad toggle:"), GUILayout.Width(150f));
             GUILayout.Label(KeyName(settings.GamepadToggleKey), GUILayout.Width(110f));
-            if (GUILayout.Button(_bindingTarget == 4 ? "press a pad button\u2026" : "Bind", GUILayout.Width(110f))) _bindingTarget = 4;
-            if (GUILayout.Button("Clear", GUILayout.Width(70f))) { settings.GamepadToggleKey = (int)KeyCode.None; settings.Save(modEntry); }
+            if (GUILayout.Button(_bindingTarget == 4 ? L("press a pad button\u2026") : L("Bind"), GUILayout.Width(110f))) _bindingTarget = 4;
+            if (GUILayout.Button(L("Clear"), GUILayout.Width(70f))) { settings.GamepadToggleKey = (int)KeyCode.None; settings.Save(modEntry); }
             GUILayout.EndHorizontal();
-            GUILayout.Label("        \u2013 alternate views from a controller button (bind D-pad up if your pad reports it as a button; Escape cancels a bind).");
-            settings.GamepadInvertPitch = GUILayout.Toggle(settings.GamepadInvertPitch, "     Invert gamepad pitch  \u2013 flip the right-stick up/down look direction (View 1 on a pad)");
-            settings.ApplyView1OnLoad = GUILayout.Toggle(settings.ApplyView1OnLoad, "  Apply View 1 on game load  \u2013 on a save load, frame View 1 on your selected character (area-to-area transitions keep the current camera)");
+            settings.GamepadInvertPitch = GUILayout.Toggle(settings.GamepadInvertPitch, "     " + L("Invert gamepad pitch  \u2013 flip the right-stick up/down look direction (View 1 on a pad)"));
+            settings.ApplyView1OnLoad = GUILayout.Toggle(settings.ApplyView1OnLoad, "  " + L("Apply View 1 on game load (area-to-area transitions keep the current camera)"));
 
             GUILayout.Space(10f);
 
             // --- Per-view blocks: everything specific to a view lives in one place ---
-            DrawViewBlock("View 1", settings.View1, 1, ref _view1Expanded);
-            DrawViewBlock("View 2", settings.View2, 2, ref _view2Expanded);
+            DrawViewBlock(L("View 1"), settings.View1, 1, ref _view1Expanded);
+            DrawViewBlock(L("View 2"), settings.View2, 2, ref _view2Expanded);
 
             GUILayout.Space(14f);
 
             // --- Camera framing (global): the master toggle that enables each view's pivot/shoulder/dolly ---
             GUILayout.BeginHorizontal();
-            settings.FramingEnabled = GUILayout.Toggle(settings.FramingEnabled, "  Focus offset  (enables each view's pivot + shoulder + dolly)", GUILayout.Width(360f));
-            settings.FramingPauseInCutscenes = GUILayout.Toggle(settings.FramingPauseInCutscenes, "pause in cutscenes");
+            settings.FramingEnabled = GUILayout.Toggle(settings.FramingEnabled, "  " + L("Focus offset  (enables each view's pivot + shoulder + dolly)"), GUILayout.Width(360f));
+            settings.FramingPauseInCutscenes = GUILayout.Toggle(settings.FramingPauseInCutscenes, L("pause in cutscenes"));
             GUILayout.EndHorizontal();
-            GUILayout.Label("     Ctrl+scroll live-tunes the active view's pivot height; Ctrl+Shift+scroll its dolly. Pivot is world-up, so it holds through turns and never jumps when mouselook toggles.");
+            GUILayout.Label("     " + L("Ctrl+scroll live-tunes the active view's pivot height; Ctrl+Shift+scroll its dolly. Pivot is world-up, so it holds through turns and never jumps when mouselook toggles."));
             GUILayout.BeginHorizontal();
-            GUILayout.Label("     In dialogue:", GUILayout.Width(150f));
-            settings.DialogFraming = (DialogFramingMode)GUILayout.Toolbar((int)settings.DialogFraming, new[] { "Off", "Lift only", "Full tactical" }, GUILayout.Width(360f));
+            GUILayout.Label("     " + L("In dialogue:"), GUILayout.Width(150f));
+            settings.DialogFraming = (DialogFramingMode)GUILayout.Toolbar((int)settings.DialogFraming, new[] { L("Off"), L("Lift only"), L("Full tactical") }, GUILayout.Width(360f));
             GUILayout.EndHorizontal();
-            GUILayout.Label("     dialogue framing \u2013 Off hands off to the game; Lift only keeps a gentle raise with no zoom; Full tactical keeps the over-the-shoulder zoom and holds your gameplay height while the game still frames the speakers left/right.");
+            GUILayout.Label("     " + L("dialogue framing \u2013 Off hands off to the game; Lift only keeps a gentle raise with no zoom; Full tactical keeps the over-the-shoulder zoom and holds your gameplay height while the game still frames the speakers left/right."));
             GUILayout.BeginHorizontal();
-            GUILayout.Label("     Dialogue height: " + settings.DialogVerticalOffset.ToString("0.0"), GUILayout.Width(150f));
+            GUILayout.Label("     " + L("Dialogue height: ") + settings.DialogVerticalOffset.ToString("0.0"), GUILayout.Width(150f));
             settings.DialogVerticalOffset = Snap(GUILayout.HorizontalSlider(settings.DialogVerticalOffset, DialogHeightMin, DialogHeightMax, GUILayout.Width(260f)), PivotStep);
             GUILayout.EndHorizontal();
-            GUILayout.Label("     vertical framing height for Full tactical dialogue \u2013 raise or lower so the speaker sits where you want. You can drag this with a conversation open to tune it live.");
+            GUILayout.Label("     " + L("vertical framing height for Full tactical dialogue \u2013 raise or lower so the speaker sits where you want. You can drag this with a conversation open to tune it live."));
 
             GUILayout.Space(14f);
 
             // --- Pitch range (global) ---
-            settings.PitchRangeEnabled = GUILayout.Toggle(settings.PitchRangeEnabled, "  Pitch range  (Mouse3 drag)");
-            GUILayout.Label("     flattest: " + settings.MinPitchAngle.ToString("0") + "\u00b0   \u2013 lower = more horizontal");
+            settings.PitchRangeEnabled = GUILayout.Toggle(settings.PitchRangeEnabled, "  " + L("Pitch range  (Mouse3 drag)"));
+            GUILayout.Label("     " + L("flattest: ") + settings.MinPitchAngle.ToString("0") + "\u00b0   " + L("\u2013 lower = more horizontal"));
             settings.MinPitchAngle = Snap(GUILayout.HorizontalSlider(settings.MinPitchAngle, MinPitchLo, MinPitchHi), PitchStep);
-            GUILayout.Label("     steepest: " + settings.MaxPitchAngle.ToString("0") + "\u00b0   \u2013 higher = more top-down");
+            GUILayout.Label("     " + L("steepest: ") + settings.MaxPitchAngle.ToString("0") + "\u00b0   " + L("\u2013 higher = more top-down"));
             settings.MaxPitchAngle = Snap(GUILayout.HorizontalSlider(settings.MaxPitchAngle, MaxPitchLo, MaxPitchHi), PitchStep);
 
             GUILayout.Space(8f);
 
             // --- Zoom limits (global) ---
             GUILayout.BeginHorizontal();
-            settings.ZoomLimitsEnabled = GUILayout.Toggle(settings.ZoomLimitsEnabled, "  Extend zoom limits  (scroll)", GUILayout.Width(250f));
-            settings.ZoomPauseInCutscenes = GUILayout.Toggle(settings.ZoomPauseInCutscenes, "pause in cutscenes");
+            settings.ZoomLimitsEnabled = GUILayout.Toggle(settings.ZoomLimitsEnabled, "  " + L("Extend zoom limits  (scroll)"), GUILayout.Width(250f));
+            settings.ZoomPauseInCutscenes = GUILayout.Toggle(settings.ZoomPauseInCutscenes, L("pause in cutscenes"));
             GUILayout.EndHorizontal();
-            GUILayout.Label("     zoom-out  \u00d7" + settings.ZoomOutFactor.ToString("0.0") + "   \u2013 pull back further");
+            GUILayout.Label("     " + L("zoom-out  \u00d7") + settings.ZoomOutFactor.ToString("0.0") + "   " + L("\u2013 pull back further"));
             settings.ZoomOutFactor = Snap(GUILayout.HorizontalSlider(settings.ZoomOutFactor, ZoomOutMin, ZoomOutMax), ZoomStep);
-            GUILayout.Label("     zoom-in  \u00d7" + settings.ZoomInFactor.ToString("0.0") + "   \u2013 get much closer");
+            GUILayout.Label("     " + L("zoom-in  \u00d7") + settings.ZoomInFactor.ToString("0.0") + "   " + L("\u2013 get much closer"));
             settings.ZoomInFactor = Snap(GUILayout.HorizontalSlider(settings.ZoomInFactor, ZoomInMin, ZoomInMax), ZoomStep);
 
             GUILayout.Space(8f);
 
             // --- Mouselook (global tuning; tick a view's "mouselook" in its block above to use it) ---
-            GUILayout.Label("Mouselook  \u2013 tick a view's \"mouselook\" box in its block above to make it drive yaw/pitch with the mouse (cursor locked to centre)");
-            GUILayout.Label("     X (yaw) sensitivity: " + settings.MouselookSensitivity.ToString("0.0"));
+            GUILayout.Label(L("Mouselook  \u2013 tick a view's \"mouselook\" box in its block above to make it drive yaw/pitch with the mouse (cursor locked to centre)"));
+            GUILayout.Label("     " + L("X (yaw) sensitivity: ") + settings.MouselookSensitivity.ToString("0.0"));
             settings.MouselookSensitivity = Snap(GUILayout.HorizontalSlider(settings.MouselookSensitivity, MouseSensMin, MouseSensMax), MouseSensStep);
-            GUILayout.Label("     Y (pitch) sensitivity: " + settings.MouselookSensY.ToString("0.0"));
+            GUILayout.Label("     " + L("Y (pitch) sensitivity: ") + settings.MouselookSensY.ToString("0.0"));
             settings.MouselookSensY = Snap(GUILayout.HorizontalSlider(settings.MouselookSensY, MouseSensMin, MouseSensMax), MouseSensStep);
             GUILayout.BeginHorizontal();
-            settings.MouselookInvertY = GUILayout.Toggle(settings.MouselookInvertY, "invert Y", GUILayout.Width(120f));
-            settings.MouselookCrosshair = GUILayout.Toggle(settings.MouselookCrosshair, "centre crosshair", GUILayout.Width(170f));
+            settings.MouselookInvertY = GUILayout.Toggle(settings.MouselookInvertY, L("invert Y"), GUILayout.Width(120f));
+            settings.MouselookCrosshair = GUILayout.Toggle(settings.MouselookCrosshair, L("centre crosshair"), GUILayout.Width(170f));
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
-            GUILayout.Label("     hold-to-free-cursor:", GUILayout.Width(190f));
+            GUILayout.Label("     " + L("hold-to-free-cursor:"), GUILayout.Width(190f));
             GUILayout.Label(KeyName(settings.FreeCursorKey), GUILayout.Width(110f));
-            if (GUILayout.Button(_bindingTarget == 5 ? "press a key\u2026" : "Bind", GUILayout.Width(110f))) _bindingTarget = 5;
+            if (GUILayout.Button(_bindingTarget == 5 ? L("press a key\u2026") : L("Bind"), GUILayout.Width(110f))) _bindingTarget = 5;
             GUILayout.EndHorizontal();
-            GUILayout.Label("     hold that key for a normal pointer; dialogue, menus, the global map and this panel free it automatically.");
+            GUILayout.Label("     " + L("hold that key for a normal pointer; dialogue, menus, the global map and this panel free it automatically."));
 
             GUILayout.Space(14f);
 
             // --- Interface (global) ---
-            GUILayout.Label("Interface");
-            settings.HideOffscreenUnitMarkers = GUILayout.Toggle(settings.HideOffscreenUnitMarkers, "  Hide off-screen character markers  (edge portrait pointers)");
-            GUILayout.Label("     hides the party-portrait pointers that ride the screen edge for off-screen characters; co-op pings and objective markers are left alone.");
+            GUILayout.Label(L("Interface"));
+            settings.HideOffscreenUnitMarkers = GUILayout.Toggle(settings.HideOffscreenUnitMarkers, "  " + L("Hide off-screen character markers  (edge portrait pointers)"));
 
             GUILayout.Space(10f);
-            if (GUILayout.Button("Reset pitch & zoom (keeps presets)", GUILayout.Width(330f)))
+            if (GUILayout.Button(L("Reset pitch & zoom (keeps presets)"), GUILayout.Width(330f)))
             {
                 settings.MinPitchAngle = 5f;
                 settings.MaxPitchAngle = 89f;
@@ -702,7 +835,7 @@ namespace ServoSkullCameraControls
             }
 
             GUILayout.Space(12f);
-            GUILayout.Label("Scripted (hard-bound) camera shots are always left alone, regardless of these settings.");
+            GUILayout.Label(L("Scripted (hard-bound) camera shots are always left alone, regardless of these settings."));
 
             GUILayout.EndVertical();
         }
@@ -713,7 +846,7 @@ namespace ServoSkullCameraControls
         {
             // Header: foldout toggle + name + saved/empty status.
             GUILayout.BeginHorizontal();
-            string status = v.IsSet ? ("saved \u2013 pitch " + v.Pitch.ToString("0") + "\u00b0, zoom " + v.Zoom.ToString("0.##")) : "empty";
+            string status = v.IsSet ? (L("saved \u2013 pitch ") + v.Pitch.ToString("0") + "\u00b0" + L(", zoom ") + v.Zoom.ToString("0.##")) : L("empty");
             if (GUILayout.Button((expanded ? "\u25bc  " : "\u25b6  ") + label, GUILayout.Width(110f))) expanded = !expanded;
             GUILayout.Label(status, GUILayout.Width(240f));
             GUILayout.EndHorizontal();
@@ -722,60 +855,60 @@ namespace ServoSkullCameraControls
             // Capture / apply / hotkey / mouselook for this view.
             GUILayout.BeginHorizontal();
             GUILayout.Space(20f);
-            if (GUILayout.Button(idx == 1 ? "Set View 1" : "Set View 2", GUILayout.Width(95f)))
+            if (GUILayout.Button(idx == 1 ? L("Set View 1") : L("Set View 2"), GUILayout.Width(95f)))
             { CaptureView(v); _activeView = idx; settings.Save(ModEntry); }
             GUI.enabled = v.IsSet;
-            if (GUILayout.Button("Apply", GUILayout.Width(70f))) { ApplyView(v); _activeView = idx; }
+            if (GUILayout.Button(L("Apply"), GUILayout.Width(70f))) { ApplyView(v); _activeView = idx; }
             GUI.enabled = true;
-            GUILayout.Label("key: " + KeyName(idx == 1 ? settings.SetView1Key : settings.SetView2Key), GUILayout.Width(120f));
-            if (GUILayout.Button(_bindingTarget == idx ? "press\u2026" : "Bind", GUILayout.Width(80f))) _bindingTarget = idx;
-            v.Mouselook = GUILayout.Toggle(v.Mouselook, "mouselook", GUILayout.Width(100f));
+            GUILayout.Label(L("key: ") + KeyName(idx == 1 ? settings.SetView1Key : settings.SetView2Key), GUILayout.Width(120f));
+            if (GUILayout.Button(_bindingTarget == idx ? L("press\u2026") : L("Bind"), GUILayout.Width(80f))) _bindingTarget = idx;
+            v.Mouselook = GUILayout.Toggle(v.Mouselook, L("mouselook"), GUILayout.Width(100f));
             GUILayout.EndHorizontal();
 
             // Zoom (camera scroll position): a slider so it can be dialled directly - useful on a pad, where the
             // right stick Y now drives pitch and can no longer zoom. Live for View 1 on a pad (the pitch-hold pins
             // it every frame); otherwise it takes effect the next time the view is applied.
             GUILayout.BeginHorizontal();
-            GUILayout.Label("     zoom: " + (v.Zoom * 100f).ToString("0") + "%", GUILayout.Width(185f));
+            GUILayout.Label("     " + L("zoom: ") + (v.Zoom * 100f).ToString("0") + "%", GUILayout.Width(185f));
             v.Zoom = Snap(GUILayout.HorizontalSlider(v.Zoom, ViewZoomMin, ViewZoomMax, GUILayout.Width(235f)), ViewZoomStep);
             GUILayout.EndHorizontal();
 
             // Focus offset (pivot / shoulder / dolly) - requires the global Focus offset toggle below.
-            GUILayout.Label("     focus offset \u2013 needs \"Focus offset\" enabled below:");
+            GUILayout.Label("     " + L("focus offset \u2013 needs \"Focus offset\" enabled below:"));
             GUILayout.BeginHorizontal();
-            GUILayout.Label("       pivot height: " + v.PivotHeight.ToString("0.0"), GUILayout.Width(185f));
+            GUILayout.Label("       " + L("pivot height: ") + v.PivotHeight.ToString("0.0"), GUILayout.Width(185f));
             v.PivotHeight = Snap(GUILayout.HorizontalSlider(v.PivotHeight, PivotMin, PivotMax, GUILayout.Width(235f)), PivotStep);
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
-            GUILayout.Label("       shoulder (0 = centred): " + v.Shoulder.ToString("0.0"), GUILayout.Width(185f));
+            GUILayout.Label("       " + L("shoulder (0 = centred): ") + v.Shoulder.ToString("0.0"), GUILayout.Width(185f));
             v.Shoulder = Snap(GUILayout.HorizontalSlider(v.Shoulder, ShoulderMax, ShoulderMin, GUILayout.Width(235f)), ShoulderStep);
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
-            GUILayout.Label("       dolly-in: " + v.Dolly.ToString("0.0"), GUILayout.Width(185f));
+            GUILayout.Label("       " + L("dolly-in: ") + v.Dolly.ToString("0.0"), GUILayout.Width(185f));
             v.Dolly = Snap(GUILayout.HorizontalSlider(v.Dolly, DollyMin, DollyMax, GUILayout.Width(235f)), DollyStep);
             GUILayout.EndHorizontal();
-            v.LiveFollow = GUILayout.Toggle(v.LiveFollow, "     live follow  \u2013 lock the model in frame at close range (best on the dollied-in view)");
+            v.LiveFollow = GUILayout.Toggle(v.LiveFollow, "     " + L("live follow  \u2013 lock the model in frame at close range (best on the dollied-in view - but can add movement stutter)"));
 
             // Keyboard rotation speed for this view.
             GUILayout.BeginHorizontal();
-            GUILayout.Label("     rotate speed (1 = stock): " + v.RotateSpeedMult.ToString("0.00") + "x", GUILayout.Width(185f));
+            GUILayout.Label("     " + L("rotate speed (1 = stock): ") + v.RotateSpeedMult.ToString("0.00") + "x", GUILayout.Width(185f));
             v.RotateSpeedMult = Snap(GUILayout.HorizontalSlider(v.RotateSpeedMult, RotMultMin, RotMultMax, GUILayout.Width(235f)), RotMultStep);
             GUILayout.EndHorizontal();
 
             // Clip planes for this view (each independent; unticked does nothing).
             GUILayout.BeginHorizontal();
-            v.NearClipEnabled = GUILayout.Toggle(v.NearClipEnabled, "  near clip", GUILayout.Width(110f));
+            v.NearClipEnabled = GUILayout.Toggle(v.NearClipEnabled, "  " + L("near clip"), GUILayout.Width(110f));
             GUILayout.Label(v.NearClip.ToString("0.0#"), GUILayout.Width(45f));
             v.NearClip = Snap(GUILayout.HorizontalSlider(v.NearClip, NearClipMin, NearClipMax, GUILayout.Width(235f)), NearClipStep);
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
-            v.FarClipEnabled = GUILayout.Toggle(v.FarClipEnabled, "  far clip", GUILayout.Width(110f));
+            v.FarClipEnabled = GUILayout.Toggle(v.FarClipEnabled, "  " + L("far clip"), GUILayout.Width(110f));
             GUILayout.Label(v.FarClip.ToString("0"), GUILayout.Width(45f));
             v.FarClip = Snap(GUILayout.HorizontalSlider(v.FarClip, FarClipMin, FarClipMax, GUILayout.Width(235f)), FarClipStep);
             GUILayout.EndHorizontal();
 
             // Solid walls for this view.
-            v.SolidWalls = GUILayout.Toggle(v.SolidWalls, "  solid walls  \u2013 stop walls/doors dissolving in front of the camera in this view");
+            v.SolidWalls = GUILayout.Toggle(v.SolidWalls, "  " + L("solid walls  \u2013 stop walls/doors dissolving in front of the camera in this view"));
 
             GUILayout.Space(10f);
         }
