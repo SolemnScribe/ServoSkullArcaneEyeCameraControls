@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net481</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <AssemblyName>ServoSkullCameraControls</AssemblyName>
+    <RootNamespace>ServoSkullCameraControls</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Deterministic>true</Deterministic>
+    <!-- build-and-package.ps1 stages a copy of Main.cs under .\package\ for the source zip.
+         That folder lives inside the project, so the SDK-style default glob would compile its
+         Main.cs alongside the real one - two definitions of every type (CS0101/CS0111). Keep
+         the staging area out of the build. (bin\ and obj\ are already excluded by the SDK.) -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);package\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <!-- EDIT these if your paths differ. Note: the Steam install folder is
+       "Warhammer 40,000 Rogue Trader" (with comma); the LocalLow UMM folder is
+       "Warhammer 40000 Rogue Trader" (no comma). -->
+  <PropertyGroup>
+    <GameDir>C:\Program Files (x86)\Steam\steamapps\common\Warhammer 40,000 Rogue Trader</GameDir>
+    <Managed>$(GameDir)\WH40KRT_Data\Managed</Managed>
+    <UMMDir>$(USERPROFILE)\AppData\LocalLow\Owlcat Games\Warhammer 40000 Rogue Trader\UnityModManager</UMMDir>
+  </PropertyGroup>
+
+  <!-- Supplies the .NET Framework 4.8.1 reference assemblies on restore, so the
+       SDK can build net481 without the standalone Developer Pack installed.
+       (Harmless if you build in Visual Studio, which already has the pack.) -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(Managed)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(Managed)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(Managed)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(Managed)\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(Managed)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityModManager">
+      <HintPath>$(UMMDir)\UnityModManager.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

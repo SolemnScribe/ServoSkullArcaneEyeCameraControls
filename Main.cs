@@ -1,0 +1,2085 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
+using UnityEngine;
+using UnityModManagerNet;
+
+namespace ServoSkullCameraControls
+{
+    // How the focus framing behaves during a conversation (RT's Dialog mode).
+    //   Off      - hand off entirely; the game frames the conversation.
+    //   Lift     - keep only the gentle world-up pivot/shoulder raise (no dolly), on the game's lowered base.
+    //   Tactical - keep the full over-the-shoulder offset incl. dolly, and cancel the game's vertical
+    //              reframing (pin the base height to the focal) so the shot matches gameplay; the game
+    //              still nudges left/right to frame the speakers.
+    public enum DialogFramingMode { Off, Lift, Tactical }
+
+    // One saved camera setup. XML-serialized inside Settings, so views persist
+    // across sessions. Yaw is intentionally NOT stored, so a view works no matter
+    // which way you are facing.
+    public class CameraView
+    {
+        public bool IsSet = false;
+        public float Pitch;     // m_TargetRotate.x, degrees
+        public float Zoom;      // CameraZoom scroll position
+        public float NearClip = 0.3f;        // per-view near clip plane (vcam lens) when NearClipEnabled
+        public bool  NearClipEnabled = true; // cull geometry closer than NearClip on this view
+        public float FarClip = 2000f;        // per-view far clip plane when FarClipEnabled (provisional range - calibrate to the game baseline)
+        public bool  FarClipEnabled = false; // cull geometry beyond FarClip on this view (off by default; can interact with fog/skybox)
+        public bool Mouselook = false; // drive yaw/pitch with the mouse while this view is active
+        public float RotateSpeedMult = 1.0f; // per-view keyboard-rotation speed multiplier (1 = unchanged)
+        public float PivotHeight = 2.0f;     // per-view world-up pivot height (~shoulder/head); raises the orbit
+        public float Shoulder = 0f;          // per-view lateral over-the-shoulder offset along Right (+/- picks the side)
+        public float Dolly = 0f;             // per-view dolly-in distance toward the focal at fixed FOV (0 = native ~27u distance)
+        public bool LiveFollow = false;      // anchor to the subject's live (smooth, interpolated) ViewTransform instead of the discrete logic-tracking focal; locks the model in frame at close range
+        public bool SolidWalls = false;      // suppress RT's occluder see-through on this view, so walls and doors in front of the camera stay solid instead of dissolving
+    }
+
+    public class Settings : UnityModManager.ModSettings
+    {
+        // --- Focus offset (per-view world-up pivot + lateral shoulder; applied in every mode) ---
+        public bool FramingEnabled = true;
+        public bool FramingPauseInCutscenes = false;
+        public DialogFramingMode DialogFraming = DialogFramingMode.Tactical;   // behaviour during RT Dialog mode (see enum)
+        public float DialogVerticalOffset = 1.3f;   // Full-tactical dialogue: world-up framing height (replaces the gameplay pivot in dialogue)
+
+        // --- Pitch range (widens the band the native Mouse3 drag is clamped to) ---
+        public bool PitchRangeEnabled = true;
+        public float MinPitchAngle = 15f;       // flattest the drag may reach
+        public float MaxPitchAngle = 89f;       // steepest the drag may reach
+
+        // --- Zoom limits (native scroll travels within these) ---
+        public bool ZoomLimitsEnabled = true;
+        public bool ZoomPauseInCutscenes = true;
+        public float ZoomOutFactor = 2.4f;      // 1..3, pull back further
+        public float ZoomInFactor = 4f;         // 1..6+, get much closer
+
+        // --- Presets ---
+        // Defaults seeded from a tuned setup: View 1 close over-the-shoulder (mouselook + dolly), View 2 wide tactical.
+        public CameraView View1 = new CameraView { IsSet = true, Pitch = 37.3301f, Zoom = 0.4f, NearClip = 1.5f, NearClipEnabled = false, Mouselook = true, RotateSpeedMult = 0.1f, PivotHeight = 1.9f, Shoulder = 0.4f, Dolly = 25.5f, LiveFollow = false, SolidWalls = true };
+        public CameraView View2 = new CameraView { IsSet = true, Pitch = -1.05517578f, Zoom = 0.3f, NearClip = 5f, NearClipEnabled = true, FarClip = 4000f, FarClipEnabled = true, Mouselook = false, RotateSpeedMult = 1.5f, PivotHeight = 0f, Shoulder = 0.4f, Dolly = 15f, LiveFollow = false, SolidWalls = false };
+        public int SetView1Key = (int)KeyCode.Keypad7;
+        public int SetView2Key = (int)KeyCode.Keypad9;
+        public int ToggleKey   = (int)KeyCode.CapsLock;
+        public int GamepadToggleKey = (int)KeyCode.JoystickButton4;   // gamepad view-toggle; defaults to the Xbox Left Bumper (LB). The D-pad reports as an axis, not a button, so Unity's input can't bind it here; rebindable to any pad button in settings
+        public bool GamepadInvertPitch = false;  // invert the right-stick pitch on a pad. Off = stick up looks up; on flips it. Needs its own flag, not MouselookInvertY: the stick vector's Y sign is already opposite Unity's Mouse Y, so the same factor reads the other way round on a pad
+
+        // Apply View 1 once when a save is loaded (initial game load), not on area-to-area transitions.
+        public bool ApplyView1OnLoad = true;
+
+        // --- Mouselook (per-view; a flagged view drives yaw/pitch with the mouse) ---
+        public float MouselookSensitivity = 2.5f;   // X (yaw) sensitivity
+        public float MouselookSensY = 0.7f;          // Y (pitch) sensitivity
+        public bool MouselookInvertY = true;
+        public bool MouselookCrosshair = true;
+        public int FreeCursorKey = (int)KeyCode.LeftShift;
+
+        // --- Off-screen character markers (the edge portrait pointers) ---
+        public bool HideOffscreenUnitMarkers = true;
+
+        public override void Save(UnityModManager.ModEntry modEntry)
+            => UnityModManager.ModSettings.Save(this, modEntry);
+    }
+
+    public static class Main
+    {
+        public static Settings settings;
+        public static UnityModManager.ModEntry.ModLogger Log;
+        public static UnityModManager.ModEntry ModEntry;
+        public static Harmony HarmonyInst;
+        public static bool Active = true;
+
+        // Live rig, cached each frame in the UpdateInternal postfix, so the preset
+        // hotkeys (handled in OnUpdate) have something to act on.
+        public static object CurrentRig;
+
+        // View-1-on-load: a save load arms _loadPending; the next area-did-load converts it into a short frame
+        // countdown (so the game's own camera restore settles first), and OnUpdate applies View 1 when it elapses.
+        // It also arms a recenter window: the game parks the camera on an establishing shot and only follows your
+        // character once you move, so for a brief window we snap the focal onto the selected unit (or main
+        // character). The window is time-based and self-terminating - it stops as soon as the focal has sat
+        // undisturbed on the subject, so it normally releases in a fraction of a second rather than running full
+        // length. Area-to-area transitions never set _loadPending, so they are left alone.
+        const int ApplyView1DelayFrames = 4;
+        const int PostDialogReapplyFrames = 10;   // wait this many frames after a scripted-shot conversation ends, for the exit blend to settle, before re-stamping the active view (tunable)
+        const float RecenterMaxSeconds = 0.8f;     // hard cap on the on-load recenter window
+        const float RecenterMinSeconds = 0.2f;     // keep correcting at least this long (covers the establishing-shot set and unit positioning)
+        const float RecenterSettleSeconds = 0.2f;  // ...then stop once the focal has sat on the subject this long undisturbed
+        static bool _loadPending;
+        static int _applyView1Countdown;
+        static int _postDialogReapply;
+        static bool _recenterActive;
+        static float _recenterElapsed, _recenterSettled;
+        internal static void NotifyGameLoad() { _loadPending = true; CameraRig_UpdateInternal_Patch.ClearFollower(); CutsceneCameraGate.Reset(); }
+        internal static void NotifyAreaDidLoad()
+        {
+            if (!_loadPending) return;
+            _loadPending = false;
+            if (settings != null && settings.ApplyView1OnLoad)
+            {
+                _applyView1Countdown = ApplyView1DelayFrames;
+                _recenterActive = true; _recenterElapsed = 0f; _recenterSettled = 0f;
+            }
+        }
+
+        // Mouselook runtime state
+        public static bool MouselookActive;      // set when a mouselook-flagged view is applied
+        public static bool CursorLocked;          // true while we hold the cursor at centre (for the crosshair)
+        public static bool MouselookJustEngaged;  // swallow one frame of mouse delta on (re)engage to avoid a jump
+        static bool _weLockedCursor;              // we, not the game, put the cursor into Locked
+
+        // Public accessor for sibling mods to read by reflection (the same way RTVR reads CursorLocked): the live
+        // world position of the subject the camera orbits - the focal, taken from the follower entity's
+        // ViewTransform. Pitch-stable (it does not swing as the camera orbits the focal), unlike camera/head
+        // height, so it is the right thing to clamp world-space placement against. False when there is no follower.
+        public static bool TryGetSubjectWorldPosition(out Vector3 pos)
+            => CameraRig_UpdateInternal_Patch.TryGetLiveSubjectPos(out pos);
+
+        // Limits / steps
+        public const float PitchHardMin = 5f, PitchHardMax = 89f;
+
+        // Mouselook is free-look: it may pitch this far above the horizon (negative = up), independent of the
+        // Mouse3-drag band. The screen-basis Up-fix keeps WASD / edge-scroll movement correct above the horizon.
+        public const float MouselookPitchMin = -85f;
+        public const float MinPitchLo = 5f, MinPitchHi = 45f;
+        public const float MaxPitchLo = 45f, MaxPitchHi = 89f, PitchStep = 1f;
+        public const float ZoomOutMin = 1f, ZoomOutMax = 3f;
+        public const float ZoomInMin = 1f, ZoomInMax = 10f, ZoomStep = 0.1f;
+        public const float NearClipMin = 0.1f, NearClipMax = 18f, NearClipStep = 0.1f;
+        public const float FarClipMin = 50f, FarClipMax = 4000f, FarClipStep = 25f;   // provisional - calibrate FarClipMax to the game's logged baseline far
+        public const float MouseSensMin = 0.2f, MouseSensMax = 10f, MouseSensStep = 0.1f;
+        public const float RotMultMin = 0.1f, RotMultMax = 2f, RotMultStep = 0.05f;
+        public const float FollowYawRate = 140f;   // deg/s the follow yaw may slew at when mult=1 (stock follow turn measured at ~131 deg/s); the per-view multiplier scales this down
+        public const float PivotMin = 0f, PivotMax = 8f, PivotStep = 0.1f;
+        public const float ShoulderMin = -8f, ShoulderMax = 8f, ShoulderStep = 0.1f;
+        public const float DollyMin = 0f, DollyMax = 32f, DollyStep = 0.5f;   // dolly-in distance toward focal (native cam-to-focal ~27.5u; max pushes to just past the model for first-person/VR)
+        public const float ViewZoomMin = 0f, ViewZoomMax = 1f, ViewZoomStep = 0.02f;   // per-view saved zoom = camera scroll position, normalised 0..1
+        public const float DollyPast = 1.0f;   // how far past the subject a full dolly may punch (near-clip culls the model when you are inside it)
+        public const float PivotScrollStep = 2.5f;   // Ctrl+scroll pivot-height change per notch
+        public const float DollyScrollStep = 2.0f;   // Ctrl+Shift+scroll dolly change per notch
+        public const float DialogHeightMin = 0f, DialogHeightMax = 4f;   // Full-tactical dialogue framing-height slider range (world-up raise)
+
+        static int _bindingTarget;   // 0 none; 1 set-view-1; 2 set-view-2; 3 toggle
+        static int _activeView;      // 0 none; 1; 2  (toggle state)
+
+        // Gamepad pitch-hold state (View 1 on a pad): the captured right-stick Y, a held pitch the stick adjusts,
+        // and the rate that turns stick deflection into deg/sec. GpRightStick* are written by the input-layer
+        // capture patch; the frame stamp lets a centred stick (which fires no Rewired event) read as zero.
+        internal static float GpRightStickY;
+        internal static int GpRightStickFrame = -100;
+        static float _gpPitch;
+        static bool _gpPitchActive;
+        public const float GamepadPitchRate = 90f;   // deg/sec at full stick, before the Y-sensitivity multiplier
+
+        // Foreign-patch suppression bookkeeping
+        static bool _suppressSettled;
+        static float _suppressElapsed;
+        static readonly string[] CameraMethods =
+        {
+            "Kingmaker.View.CameraZoom:TickZoom",
+        };
+
+        public static bool Load(UnityModManager.ModEntry modEntry)
+        {
+            ModEntry = modEntry;
+            Log = modEntry.Logger;
+            settings = UnityModManager.ModSettings.Load<Settings>(modEntry);
+
+            HarmonyInst = new Harmony(modEntry.Info.Id);
+            HarmonyInst.PatchAll(Assembly.GetExecutingAssembly());
+
+            modEntry.OnToggle = OnToggle;
+            modEntry.OnUpdate = OnUpdate;
+            modEntry.OnGUI = OnGUI;
+            modEntry.OnSaveGUI = OnSaveGUI;
+
+            // Persistent IMGUI object that draws the centre crosshair while mouselook holds the cursor.
+            if (GameObject.Find("ServoSkullMouselookCrosshair") == null)
+            {
+                var crosshairGo = new GameObject("ServoSkullMouselookCrosshair");
+                UnityEngine.Object.DontDestroyOnLoad(crosshairGo);
+                crosshairGo.AddComponent<MouselookCrosshair>();
+            }
+            return true;
+        }
+
+        static bool OnToggle(UnityModManager.ModEntry modEntry, bool value)
+        {
+            Active = value;
+            if (!value) RestoreOccluderClip();   // mod disabled in UMM: re-enable the game's clip if we were holding it off
+            return true;
+        }
+
+        static void OnUpdate(UnityModManager.ModEntry modEntry, float dt)
+        {
+            SuppressForeignCameraPatches();
+            UpdateCursorLock();
+
+            if (settings == null) return;
+            if (_bindingTarget == 4) { ScanGamepadBind(); return; }   // armed for a gamepad button: IMGUI key events can't see JoystickButtons, so poll them here
+            if (_bindingTarget != 0) return;
+
+            if (!Active || CurrentRig == null) return;
+
+            // Hand the camera back once the conversation that owned a scripted shot has ended. If a scripted shot
+            // did own it, arm a short delayed re-stamp of the active view: the conversation's exit blend restores
+            // the game's own camera, so (as with the on-load apply below) we wait a few frames for it to settle.
+            if (CutsceneCameraGate.ReleaseAndCheckReapply(CameraRig_UpdateInternal_Patch.InDialogMode()) && _activeView != 0)
+                _postDialogReapply = PostDialogReapplyFrames;
+
+            // View-1-on-load: armed by a save load and delayed a few frames past the area load so the game's
+            // own camera restore settles first; then apply View 1 once. (Area transitions never arm this.)
+            if (_applyView1Countdown > 0)
+            {
+                _applyView1Countdown--;
+                if (_applyView1Countdown == 0 && settings.ApplyView1OnLoad && settings.View1.IsSet)
+                {
+                    ApplyView(settings.View1);
+                    _activeView = 1;
+                    Log?.Log("Applied View 1 on game load.");
+                }
+            }
+
+            // Post-dialogue re-stamp: an in-dialogue scripted shot left the camera on the game's restored
+            // pitch/zoom, so the per-frame focus offset was resuming on the wrong base. Re-apply the active view
+            // once the exit blend has settled (mirrors the on-load apply above). Skip if a new dialogue/cutscene
+            // has already taken the camera.
+            if (_postDialogReapply > 0)
+            {
+                _postDialogReapply--;
+                if (_postDialogReapply == 0 && _activeView != 0
+                    && !CameraRig_UpdateInternal_Patch.InDialogMode()
+                    && !CameraRig_UpdateInternal_Patch.InCutscene())
+                {
+                    ApplyView(ActiveViewObj());
+                    Log?.Log("Re-applied active view after dialogue.");
+                }
+            }
+
+            // Answer-driven re-stamp: the player advanced past a held scripted shot and the next beat turned out
+            // to be ordinary dialogue (no new shot superseded the debounce), so bring the active view back now,
+            // mid-conversation, without waiting for the whole dialogue to end.
+            if (CutsceneCameraGate.TickAnswerReclaim(Time.unscaledDeltaTime) && _activeView != 0)
+            {
+                ApplyView(ActiveViewObj());
+                Log?.Log("Re-stamped active view after dialogue advance.");
+            }
+
+            // Recenter window: on a save load the camera sits on the area's establishing shot and the follow only
+            // attaches to your character when you first move. Until then, snap the focal onto the selected unit
+            // (or main character) so a close View 1 frames it. Stop as soon as you take control (the follower goes
+            // live and now holds the focal), or once the focal has sat undisturbed on the subject past a short
+            // minimum, or at the hard cap; skip while a cutscene owns the camera.
+            if (_recenterActive)
+            {
+                _recenterElapsed += Time.unscaledDeltaTime;
+                if (CameraRig_UpdateInternal_Patch.FollowerActive() || _recenterElapsed >= RecenterMaxSeconds)
+                    _recenterActive = false;
+                else if (!CameraRig_UpdateInternal_Patch.InCutscene())
+                {
+                    if (CameraRig_UpdateInternal_Patch.RecenterFocalOnSubject(out bool moved))
+                    {
+                        _recenterSettled = moved ? 0f : _recenterSettled + Time.unscaledDeltaTime;
+                        if (_recenterElapsed >= RecenterMinSeconds && _recenterSettled >= RecenterSettleSeconds)
+                            _recenterActive = false;
+                    }
+                }
+            }
+
+            // View keys are inert on the system/sector map: the game owns that camera, and Set/Toggle run
+            // ApplyView, a one-shot direct write to the rig (m_TargetRotate etc.) that pokes the map camera's
+            // pitch even though the per-frame framing/clip already stand down there. (StarSystem pitch jump.)
+            if (!CameraRig_UpdateInternal_Patch.InMapMode())
+            {
+                if (KeyDown(settings.SetView1Key)) { CaptureView(settings.View1); _activeView = 1; settings.Save(modEntry); }
+                else if (KeyDown(settings.SetView2Key)) { CaptureView(settings.View2); _activeView = 2; settings.Save(modEntry); }
+                else if (KeyDown(settings.ToggleKey)) ToggleViews();
+                else if (KeyDown(settings.GamepadToggleKey)) ToggleViews();
+            }
+
+            // Hold RT's occluder see-through off while a solid-walls view is active (restored when we leave it).
+            UpdateOccluderClip();
+        }
+
+        static bool KeyDown(int k) => k != (int)KeyCode.None && Input.GetKeyDown((KeyCode)k);
+
+        static bool FreeCursorHeld()
+            => settings != null && settings.FreeCursorKey != (int)KeyCode.None
+               && Input.GetKey((KeyCode)settings.FreeCursorKey);
+
+        // The UMM manager window is an IMGUI overlay the game's UI state knows nothing about,
+        // so mouselook must yield the cursor while it is open (to bind keys, tick views, etc.).
+        static bool _ummProbed;
+        static PropertyInfo _ummInstance, _ummOpened;
+        static bool UmmWindowOpen()
+        {
+            try
+            {
+                if (!_ummProbed)
+                {
+                    _ummProbed = true;
+                    var ui = typeof(UnityModManager).GetNestedType("UI");
+                    if (ui != null)
+                    {
+                        _ummInstance = ui.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+                        _ummOpened = ui.GetProperty("Opened", BindingFlags.Public | BindingFlags.Instance);
+                    }
+                }
+                if (_ummInstance == null || _ummOpened == null) return false;
+                var inst = _ummInstance.GetValue(null);
+                return inst != null && _ummOpened.GetValue(inst) is bool b && b;
+            }
+            catch { return false; }
+        }
+
+        // Mouselook controls the camera only in plain surface gameplay: a flagged view is active,
+        // nothing (UI, dialogue, cutscene, the UMM panel) needs the cursor, and the free key is up.
+        public static bool MouselookEngaged()
+        {
+            if (!Active || settings == null || !MouselookActive) return false;
+            if (FreeCursorHeld() || UmmWindowOpen()) return false;
+            if (!UIGate.PlainSurface()) return false;
+            if (CameraRig_UpdateInternal_Patch.InCutscene()) return false;
+            if (CameraRig_UpdateInternal_Patch.InGamepadMode()) return false;   // stick can't drive mouse axes; let the game's native look run
+            return true;
+        }
+
+        // Lock the cursor to centre while engaged; release it (once) when we stop. Re-asserts each
+        // frame so the game cannot quietly steal it back while mouselook is meant to be holding it.
+        static void UpdateCursorLock()
+        {
+            bool engaged = MouselookEngaged();
+            if (engaged)
+            {
+                if (Cursor.lockState != CursorLockMode.Locked) Cursor.lockState = CursorLockMode.Locked;
+                if (Cursor.visible) Cursor.visible = false;
+                if (!_weLockedCursor) MouselookJustEngaged = true;   // ignore the delta accrued before the lock
+                _weLockedCursor = true;
+            }
+            else if (_weLockedCursor)
+            {
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+                _weLockedCursor = false;
+            }
+            CursorLocked = engaged;
+        }
+
+        // Strip any non-ours prefix off CameraZoom.TickZoom - that is ToyBox's FOV
+        // override, which otherwise ignores the FovMin/FovMax our zoom range sets.
+        // ToyBox's rig patches (Mouse3 pitch / Ctrl+Mouse3 elevation) are deliberately
+        // left in place: RT has no native pitch, so we rely on ToyBox for it.
+        // Retries briefly so it is load-order independent.
+        static void SuppressForeignCameraPatches()
+        {
+            if (_suppressSettled || HarmonyInst == null) return;
+            _suppressElapsed += Time.unscaledDeltaTime;
+
+            var toRemove = new List<KeyValuePair<MethodBase, MethodInfo>>();
+            foreach (var sig in CameraMethods)
+            {
+                MethodBase m;
+                try { m = AccessTools.Method(sig); } catch { m = null; }
+                if (m == null) continue;
+                var info = Harmony.GetPatchInfo(m);
+                if (info?.Prefixes == null) continue;
+                foreach (var p in info.Prefixes)
+                    if (p.owner != HarmonyInst.Id)
+                        toRemove.Add(new KeyValuePair<MethodBase, MethodInfo>(m, p.PatchMethod));
+            }
+
+            foreach (var kv in toRemove)
+            {
+                try { HarmonyInst.Unpatch(kv.Key, kv.Value); Log?.Log("Released camera: removed a foreign patch from " + kv.Key.Name + "."); }
+                catch (Exception e) { Log?.Error("Unpatch failed: " + e.Message); }
+            }
+
+            if (toRemove.Count > 0 || _suppressElapsed > 12f) _suppressSettled = true;
+        }
+
+        // ---- Presets ----
+        static void CaptureView(CameraView v)
+        {
+            if (CurrentRig == null) return;
+            try
+            {
+                var t = Traverse.Create(CurrentRig);
+                Vector3 tr = t.Field("m_TargetRotate").GetValue<Vector3>();
+                v.Pitch = tr.x;
+
+                var zoom = t.Property("CameraZoom").GetValue<object>();
+                if (zoom != null)
+                    v.Zoom = Traverse.Create(zoom).Field("m_PlayerScrollPosition").GetValue<float>();
+
+                v.IsSet = true;
+                Log?.Log("Saved view: pitch " + v.Pitch.ToString("0.#") + ", zoom " + v.Zoom.ToString("0.##") + ", nearclip " + v.NearClip.ToString("0.0#") + ", pivot " + v.PivotHeight.ToString("0.#") + ", shoulder " + v.Shoulder.ToString("0.#") + ".");
+            }
+            catch (Exception e) { Log?.Error("Saving view failed: " + e); }
+        }
+
+        static void ApplyView(CameraView v)
+        {
+            if (CurrentRig == null || v == null || !v.IsSet) return;
+            try
+            {
+                var t = Traverse.Create(CurrentRig);
+
+                // Pitch: set the rig's target rotation and snap the transform to match,
+                // keeping the current yaw so facing is preserved.
+                var trF = t.Field("m_TargetRotate");
+                Vector3 tr = trF.GetValue<Vector3>();
+                tr.x = v.Pitch;
+                tr.z = 0f;
+                trF.SetValue(tr);
+                var comp = CurrentRig as Component;
+                if (comp != null) comp.transform.rotation = Quaternion.Euler(tr);
+
+                // Zoom: write the scroll position (and the smooth value so it snaps).
+                var zoom = t.Property("CameraZoom").GetValue<object>();
+                if (zoom != null)
+                {
+                    var tz = Traverse.Create(zoom);
+                    SetFloat(tz, "m_PlayerScrollPosition", v.Zoom);
+                    SetFloat(tz, "m_ScrollPosition", v.Zoom);
+                    SetFloat(tz, "m_SmoothScrollPosition", v.Zoom);
+                }
+
+                // Mouselook follows the applied view: a flagged view enters it, a normal view leaves it.
+                MouselookActive = v.Mouselook;
+                // We just seated the camera by hand; clear the mouselook seat so the next frame re-reads pitch
+                // from what we applied (and the exit-sync can't stamp the old mouselook pitch back over it).
+                CameraRig_UpdateInternal_Patch.ResetMouselookSeat();
+                _gpPitchActive = false;   // re-seat the gamepad pitch-hold too, so a re-stamp re-establishes the view on a pad
+            }
+            catch (Exception e) { Log?.Error("Applying view failed: " + e); }
+        }
+
+        static void SetFloat(Traverse owner, string field, float val)
+        {
+            var f = owner.Field(field);
+            if (f.FieldExists()) f.SetValue(val);
+        }
+
+        // A scripted in-dialogue shot is taking the camera. The base game has no pitch control and composes
+        // these shots assuming the camera sits at its standard level (0) pitch; our view pitch would tilt the
+        // shot. So as we hand control over, put the rig pitch back to 0 and leave the facing (yaw) alone.
+        // Nothing re-applies the view's pitch while the shot holds (mouselook is released during dialogue and
+        // ApplyView is one-shot), so a single zero sticks; the dialogue-end re-stamp restores the view after.
+        internal static void ZeroRigPitchForCutscene()
+        {
+            if (CurrentRig == null) return;
+            try
+            {
+                var t = Traverse.Create(CurrentRig);
+                var trF = t.Field("m_TargetRotate");
+                Vector3 tr = trF.GetValue<Vector3>();
+                tr.x = 0f; tr.z = 0f;
+                trF.SetValue(tr);
+                var comp = CurrentRig as Component;
+                if (comp != null) comp.transform.rotation = Quaternion.Euler(tr);
+            }
+            catch (Exception e) { Log?.Error("Zero rig pitch for cutscene failed: " + e); }
+        }
+
+        // Current right-stick Y for pitch, or zero when the stick is centred. Rewired fires OnMoveRightStick
+        // only while the stick is deflected, so a stamp older than this frame means "centred"; a small deadzone
+        // guards against residual drift.
+        internal static float GamepadPitchInput()
+        {
+            if (Time.frameCount - GpRightStickFrame > 1) return 0f;
+            float y = GpRightStickY;
+            return Mathf.Abs(y) < 0.12f ? 0f : y;
+        }
+
+        // The pitch-hold runs only for View 1 on a pad with a set view.
+        static bool GamepadPitchHoldActive()
+        {
+            return _activeView == 1 && settings != null && settings.View1 != null && settings.View1.IsSet
+                && CameraRig_UpdateInternal_Patch.InGamepadMode();
+        }
+
+        // Gamepad View-1 pitch-hold. Mouselook stands aside on a pad, so the mod owns View 1's pitch here the
+        // same way mouselook owns it with a mouse: seat on the current pitch, then let the right stick Y (remapped
+        // from zoom) adjust a held value we re-assert every frame, keeping the game's stick-X yaw. Zoom is pinned
+        // to the view so the remapped Y no longer zooms. Because pitch and zoom are re-asserted every frame, this
+        // is also the backstop that keeps View 1 framed across dialogue and area transitions - the role mouselook
+        // plays in mouse mode, which a pad otherwise has nothing to fill. Stands down during scripted shots, the
+        // map, cutscenes and dialogue (as mouselook does), so those keep their own camera; ApplyView re-seats the
+        // hold so a post-dialogue / on-load re-stamp re-establishes the view.
+        internal static void TickGamepadPitchHold(bool hardBind)
+        {
+            if (hardBind || CurrentRig == null || !GamepadPitchHoldActive()
+                || CameraRig_UpdateInternal_Patch.InCutscene()
+                || CameraRig_UpdateInternal_Patch.InDialogMode()
+                || CameraRig_UpdateInternal_Patch.InMapMode()
+                || CutsceneCameraGate.CameraCutsceneActive())
+            {
+                _gpPitchActive = false;
+                return;
+            }
+            try
+            {
+                var t = Traverse.Create(CurrentRig);
+                var trf = t.Field("m_TargetRotate");
+                Vector3 tr = trf.GetValue<Vector3>();
+                if (!_gpPitchActive)
+                {
+                    _gpPitch = tr.x;          // seat on the current pitch (the freshly-applied view) - no snap
+                    _gpPitchActive = true;
+                }
+                else
+                {
+                    float sensY = Mathf.Max(0.01f, settings.MouselookSensY);
+                    float dy = GamepadPitchInput() * sensY * GamepadPitchRate * Time.unscaledDeltaTime
+                               * (settings.GamepadInvertPitch ? -1f : 1f);   // off keeps the tuned default (+1 = stick up looks up, given the stick's Y sign); on inverts
+                    float loP = MouselookPitchMin;
+                    float hiP = Mathf.Clamp(settings.MaxPitchAngle, PitchHardMin, PitchHardMax);
+                    if (hiP < loP) { float tmp = loP; loP = hiP; hiP = tmp; }
+                    _gpPitch = Mathf.Clamp(_gpPitch + dy, loP, hiP);
+                }
+                tr.x = _gpPitch; tr.z = 0f;   // keep .y (the game's stick-X yaw)
+                trf.SetValue(tr);
+                var comp = CurrentRig as Component;
+                if (comp != null) comp.transform.rotation = Quaternion.Euler(_gpPitch, comp.transform.eulerAngles.y, 0f);
+
+                // Pin zoom to the view so the remapped stick Y can't also zoom.
+                var zoom = t.Property("CameraZoom").GetValue<object>();
+                if (zoom != null)
+                {
+                    var tz = Traverse.Create(zoom);
+                    SetFloat(tz, "m_PlayerScrollPosition", settings.View1.Zoom);
+                    SetFloat(tz, "m_ScrollPosition", settings.View1.Zoom);
+                    SetFloat(tz, "m_SmoothScrollPosition", settings.View1.Zoom);
+                }
+            }
+            catch (Exception e) { Log?.Error("Gamepad pitch-hold failed: " + e); }
+        }
+
+        static void ToggleViews()
+        {
+            int next = (_activeView == 1) ? 2 : 1;
+            if (next == 1 && !settings.View1.IsSet && settings.View2.IsSet) next = 2;
+            if (next == 2 && !settings.View2.IsSet && settings.View1.IsSet) next = 1;
+            var v = (next == 1) ? settings.View1 : settings.View2;
+            if (!v.IsSet) { Log?.Log("Toggle pressed, but no view is saved yet."); return; }
+            ApplyView(v);
+            _activeView = next;
+        }
+
+        // Capture a gamepad button for the view-toggle bind. IMGUI's keyboard event (CaptureBindKey) never sees
+        // JoystickButton presses, so while armed (target 4) we poll them here each frame; any keyboard key or
+        // Escape cancels the bind through CaptureBindKey instead.
+        static void ScanGamepadBind()
+        {
+            for (int b = (int)KeyCode.JoystickButton0; b <= (int)KeyCode.JoystickButton19; b++)
+            {
+                if (Input.GetKeyDown((KeyCode)b))
+                {
+                    settings.GamepadToggleKey = b;
+                    settings.Save(ModEntry);
+                    _bindingTarget = 0;
+                    return;
+                }
+            }
+        }
+
+        // ---- GUI ----
+        // Foldout state for the per-view setting blocks (UI only; defaults open, resets per session).
+        static bool _view1Expanded = true, _view2Expanded = true;
+
+        static void OnGUI(UnityModManager.ModEntry modEntry)
+        {
+            CaptureBindKey();   // must run before the widgets consume the event
+
+            GUILayout.BeginVertical();
+
+            if (ToyBoxProbe.CtrlElevationOn() == true)
+            {
+                var warnPrev = GUI.color;
+                GUI.color = new Color(1f, 0.55f, 0.2f);
+                GUILayout.Label("\u26a0  ToyBox: \"Ctrl + Mouse3 Drag To Adjust Camera Elevation\" is ON \u2013 it makes the camera load at a map origin and pan from there. Turn it off in ToyBox \u2192 Camera. (The Mouse3-aim option is fine to keep; pitch needs it.)");
+                GUI.color = warnPrev;
+                GUILayout.Space(8f);
+            }
+
+            // --- Presets (cross-view) ---
+            GUILayout.Label("Camera presets  \u2013 two saved framings, alternated with one key. Each view's own controls live in its block below; facing is never stored.");
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     Toggle key:", GUILayout.Width(150f));
+            GUILayout.Label(KeyName(settings.ToggleKey), GUILayout.Width(110f));
+            if (GUILayout.Button(_bindingTarget == 3 ? "press a key\u2026" : "Bind", GUILayout.Width(110f))) _bindingTarget = 3;
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     Gamepad toggle:", GUILayout.Width(150f));
+            GUILayout.Label(KeyName(settings.GamepadToggleKey), GUILayout.Width(110f));
+            if (GUILayout.Button(_bindingTarget == 4 ? "press a pad button\u2026" : "Bind", GUILayout.Width(110f))) _bindingTarget = 4;
+            if (GUILayout.Button("Clear", GUILayout.Width(70f))) { settings.GamepadToggleKey = (int)KeyCode.None; settings.Save(modEntry); }
+            GUILayout.EndHorizontal();
+            GUILayout.Label("        \u2013 alternate views from a controller button (bind D-pad up if your pad reports it as a button; Escape cancels a bind).");
+            settings.GamepadInvertPitch = GUILayout.Toggle(settings.GamepadInvertPitch, "     Invert gamepad pitch  \u2013 flip the right-stick up/down look direction (View 1 on a pad)");
+            settings.ApplyView1OnLoad = GUILayout.Toggle(settings.ApplyView1OnLoad, "  Apply View 1 on game load  \u2013 on a save load, frame View 1 on your selected character (area-to-area transitions keep the current camera)");
+
+            GUILayout.Space(10f);
+
+            // --- Per-view blocks: everything specific to a view lives in one place ---
+            DrawViewBlock("View 1", settings.View1, 1, ref _view1Expanded);
+            DrawViewBlock("View 2", settings.View2, 2, ref _view2Expanded);
+
+            GUILayout.Space(14f);
+
+            // --- Camera framing (global): the master toggle that enables each view's pivot/shoulder/dolly ---
+            GUILayout.BeginHorizontal();
+            settings.FramingEnabled = GUILayout.Toggle(settings.FramingEnabled, "  Focus offset  (enables each view's pivot + shoulder + dolly)", GUILayout.Width(360f));
+            settings.FramingPauseInCutscenes = GUILayout.Toggle(settings.FramingPauseInCutscenes, "pause in cutscenes");
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     Ctrl+scroll live-tunes the active view's pivot height; Ctrl+Shift+scroll its dolly. Pivot is world-up, so it holds through turns and never jumps when mouselook toggles.");
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     In dialogue:", GUILayout.Width(150f));
+            settings.DialogFraming = (DialogFramingMode)GUILayout.Toolbar((int)settings.DialogFraming, new[] { "Off", "Lift only", "Full tactical" }, GUILayout.Width(360f));
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     dialogue framing \u2013 Off hands off to the game; Lift only keeps a gentle raise with no zoom; Full tactical keeps the over-the-shoulder zoom and holds your gameplay height while the game still frames the speakers left/right.");
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     Dialogue height: " + settings.DialogVerticalOffset.ToString("0.0"), GUILayout.Width(150f));
+            settings.DialogVerticalOffset = Snap(GUILayout.HorizontalSlider(settings.DialogVerticalOffset, DialogHeightMin, DialogHeightMax, GUILayout.Width(260f)), PivotStep);
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     vertical framing height for Full tactical dialogue \u2013 raise or lower so the speaker sits where you want. You can drag this with a conversation open to tune it live.");
+
+            GUILayout.Space(14f);
+
+            // --- Pitch range (global) ---
+            settings.PitchRangeEnabled = GUILayout.Toggle(settings.PitchRangeEnabled, "  Pitch range  (Mouse3 drag)");
+            GUILayout.Label("     flattest: " + settings.MinPitchAngle.ToString("0") + "\u00b0   \u2013 lower = more horizontal");
+            settings.MinPitchAngle = Snap(GUILayout.HorizontalSlider(settings.MinPitchAngle, MinPitchLo, MinPitchHi), PitchStep);
+            GUILayout.Label("     steepest: " + settings.MaxPitchAngle.ToString("0") + "\u00b0   \u2013 higher = more top-down");
+            settings.MaxPitchAngle = Snap(GUILayout.HorizontalSlider(settings.MaxPitchAngle, MaxPitchLo, MaxPitchHi), PitchStep);
+
+            GUILayout.Space(8f);
+
+            // --- Zoom limits (global) ---
+            GUILayout.BeginHorizontal();
+            settings.ZoomLimitsEnabled = GUILayout.Toggle(settings.ZoomLimitsEnabled, "  Extend zoom limits  (scroll)", GUILayout.Width(250f));
+            settings.ZoomPauseInCutscenes = GUILayout.Toggle(settings.ZoomPauseInCutscenes, "pause in cutscenes");
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     zoom-out  \u00d7" + settings.ZoomOutFactor.ToString("0.0") + "   \u2013 pull back further");
+            settings.ZoomOutFactor = Snap(GUILayout.HorizontalSlider(settings.ZoomOutFactor, ZoomOutMin, ZoomOutMax), ZoomStep);
+            GUILayout.Label("     zoom-in  \u00d7" + settings.ZoomInFactor.ToString("0.0") + "   \u2013 get much closer");
+            settings.ZoomInFactor = Snap(GUILayout.HorizontalSlider(settings.ZoomInFactor, ZoomInMin, ZoomInMax), ZoomStep);
+
+            GUILayout.Space(8f);
+
+            // --- Mouselook (global tuning; tick a view's "mouselook" in its block above to use it) ---
+            GUILayout.Label("Mouselook  \u2013 tick a view's \"mouselook\" box in its block above to make it drive yaw/pitch with the mouse (cursor locked to centre)");
+            GUILayout.Label("     X (yaw) sensitivity: " + settings.MouselookSensitivity.ToString("0.0"));
+            settings.MouselookSensitivity = Snap(GUILayout.HorizontalSlider(settings.MouselookSensitivity, MouseSensMin, MouseSensMax), MouseSensStep);
+            GUILayout.Label("     Y (pitch) sensitivity: " + settings.MouselookSensY.ToString("0.0"));
+            settings.MouselookSensY = Snap(GUILayout.HorizontalSlider(settings.MouselookSensY, MouseSensMin, MouseSensMax), MouseSensStep);
+            GUILayout.BeginHorizontal();
+            settings.MouselookInvertY = GUILayout.Toggle(settings.MouselookInvertY, "invert Y", GUILayout.Width(120f));
+            settings.MouselookCrosshair = GUILayout.Toggle(settings.MouselookCrosshair, "centre crosshair", GUILayout.Width(170f));
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     hold-to-free-cursor:", GUILayout.Width(190f));
+            GUILayout.Label(KeyName(settings.FreeCursorKey), GUILayout.Width(110f));
+            if (GUILayout.Button(_bindingTarget == 5 ? "press a key\u2026" : "Bind", GUILayout.Width(110f))) _bindingTarget = 5;
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     hold that key for a normal pointer; dialogue, menus, the global map and this panel free it automatically.");
+
+            GUILayout.Space(14f);
+
+            // --- Interface (global) ---
+            GUILayout.Label("Interface");
+            settings.HideOffscreenUnitMarkers = GUILayout.Toggle(settings.HideOffscreenUnitMarkers, "  Hide off-screen character markers  (edge portrait pointers)");
+            GUILayout.Label("     hides the party-portrait pointers that ride the screen edge for off-screen characters; co-op pings and objective markers are left alone.");
+
+            GUILayout.Space(10f);
+            if (GUILayout.Button("Reset pitch & zoom (keeps presets)", GUILayout.Width(330f)))
+            {
+                settings.MinPitchAngle = 5f;
+                settings.MaxPitchAngle = 89f;
+                settings.ZoomOutFactor = 1f;
+                settings.ZoomInFactor = 4f;
+            }
+
+            GUILayout.Space(12f);
+            GUILayout.Label("Scripted (hard-bound) camera shots are always left alone, regardless of these settings.");
+
+            GUILayout.EndVertical();
+        }
+
+        // Draws one view's collapsible block: a foldout header plus, when open, every setting that
+        // belongs to that view. Both views call this, so a new per-view control is added in one place.
+        static void DrawViewBlock(string label, CameraView v, int idx, ref bool expanded)
+        {
+            // Header: foldout toggle + name + saved/empty status.
+            GUILayout.BeginHorizontal();
+            string status = v.IsSet ? ("saved \u2013 pitch " + v.Pitch.ToString("0") + "\u00b0, zoom " + v.Zoom.ToString("0.##")) : "empty";
+            if (GUILayout.Button((expanded ? "\u25bc  " : "\u25b6  ") + label, GUILayout.Width(110f))) expanded = !expanded;
+            GUILayout.Label(status, GUILayout.Width(240f));
+            GUILayout.EndHorizontal();
+            if (!expanded) return;
+
+            // Capture / apply / hotkey / mouselook for this view.
+            GUILayout.BeginHorizontal();
+            GUILayout.Space(20f);
+            if (GUILayout.Button(idx == 1 ? "Set View 1" : "Set View 2", GUILayout.Width(95f)))
+            { CaptureView(v); _activeView = idx; settings.Save(ModEntry); }
+            GUI.enabled = v.IsSet;
+            if (GUILayout.Button("Apply", GUILayout.Width(70f))) { ApplyView(v); _activeView = idx; }
+            GUI.enabled = true;
+            GUILayout.Label("key: " + KeyName(idx == 1 ? settings.SetView1Key : settings.SetView2Key), GUILayout.Width(120f));
+            if (GUILayout.Button(_bindingTarget == idx ? "press\u2026" : "Bind", GUILayout.Width(80f))) _bindingTarget = idx;
+            v.Mouselook = GUILayout.Toggle(v.Mouselook, "mouselook", GUILayout.Width(100f));
+            GUILayout.EndHorizontal();
+
+            // Zoom (camera scroll position): a slider so it can be dialled directly - useful on a pad, where the
+            // right stick Y now drives pitch and can no longer zoom. Live for View 1 on a pad (the pitch-hold pins
+            // it every frame); otherwise it takes effect the next time the view is applied.
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     zoom: " + (v.Zoom * 100f).ToString("0") + "%", GUILayout.Width(185f));
+            v.Zoom = Snap(GUILayout.HorizontalSlider(v.Zoom, ViewZoomMin, ViewZoomMax, GUILayout.Width(235f)), ViewZoomStep);
+            GUILayout.EndHorizontal();
+
+            // Focus offset (pivot / shoulder / dolly) - requires the global Focus offset toggle below.
+            GUILayout.Label("     focus offset \u2013 needs \"Focus offset\" enabled below:");
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("       pivot height: " + v.PivotHeight.ToString("0.0"), GUILayout.Width(185f));
+            v.PivotHeight = Snap(GUILayout.HorizontalSlider(v.PivotHeight, PivotMin, PivotMax, GUILayout.Width(235f)), PivotStep);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("       shoulder (0 = centred): " + v.Shoulder.ToString("0.0"), GUILayout.Width(185f));
+            v.Shoulder = Snap(GUILayout.HorizontalSlider(v.Shoulder, ShoulderMax, ShoulderMin, GUILayout.Width(235f)), ShoulderStep);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("       dolly-in: " + v.Dolly.ToString("0.0"), GUILayout.Width(185f));
+            v.Dolly = Snap(GUILayout.HorizontalSlider(v.Dolly, DollyMin, DollyMax, GUILayout.Width(235f)), DollyStep);
+            GUILayout.EndHorizontal();
+            v.LiveFollow = GUILayout.Toggle(v.LiveFollow, "     live follow  \u2013 lock the model in frame at close range (best on the dollied-in view)");
+
+            // Keyboard rotation speed for this view.
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     rotate speed (1 = stock): " + v.RotateSpeedMult.ToString("0.00") + "x", GUILayout.Width(185f));
+            v.RotateSpeedMult = Snap(GUILayout.HorizontalSlider(v.RotateSpeedMult, RotMultMin, RotMultMax, GUILayout.Width(235f)), RotMultStep);
+            GUILayout.EndHorizontal();
+
+            // Clip planes for this view (each independent; unticked does nothing).
+            GUILayout.BeginHorizontal();
+            v.NearClipEnabled = GUILayout.Toggle(v.NearClipEnabled, "  near clip", GUILayout.Width(110f));
+            GUILayout.Label(v.NearClip.ToString("0.0#"), GUILayout.Width(45f));
+            v.NearClip = Snap(GUILayout.HorizontalSlider(v.NearClip, NearClipMin, NearClipMax, GUILayout.Width(235f)), NearClipStep);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            v.FarClipEnabled = GUILayout.Toggle(v.FarClipEnabled, "  far clip", GUILayout.Width(110f));
+            GUILayout.Label(v.FarClip.ToString("0"), GUILayout.Width(45f));
+            v.FarClip = Snap(GUILayout.HorizontalSlider(v.FarClip, FarClipMin, FarClipMax, GUILayout.Width(235f)), FarClipStep);
+            GUILayout.EndHorizontal();
+
+            // Solid walls for this view.
+            v.SolidWalls = GUILayout.Toggle(v.SolidWalls, "  solid walls  \u2013 stop walls/doors dissolving in front of the camera in this view");
+
+            GUILayout.Space(10f);
+        }
+
+        static void CaptureBindKey()
+        {
+            if (_bindingTarget == 0) return;
+            var e = Event.current;
+            if (e == null || e.type != EventType.KeyDown) return;
+            var kc = e.keyCode;
+            if (kc == KeyCode.None) return;
+            if (kc != KeyCode.Escape)
+            {
+                switch (_bindingTarget)
+                {
+                    case 1: settings.SetView1Key = (int)kc; break;
+                    case 2: settings.SetView2Key = (int)kc; break;
+                    case 3: settings.ToggleKey = (int)kc; break;
+                    case 5: settings.FreeCursorKey = (int)kc; break;
+                }
+            }
+            _bindingTarget = 0;
+            e.Use();
+        }
+
+        static string KeyName(int k) => k == (int)KeyCode.None ? "(none)" : ((KeyCode)k).ToString();
+
+        static float Snap(float value, float step) => Mathf.Round(value / step) * step;
+
+        // Per-view keyboard-rotation multiplier for whichever preset is currently active (1 if none).
+        internal static float ActiveViewRotMult()
+        {
+            if (settings == null) return 1f;
+            if (CameraRig_UpdateInternal_Patch.InGamepadMode()) return 1f;   // stick turns at stock speed; the slow-down is a keyboard-strafing tool
+            if (_activeView == 1) return Mathf.Clamp(settings.View1.RotateSpeedMult, RotMultMin, RotMultMax);
+            if (_activeView == 2) return Mathf.Clamp(settings.View2.RotateSpeedMult, RotMultMin, RotMultMax);
+            return 1f;
+        }
+
+        // Per-view world-up pivot height for whichever preset is currently active (0 if none).
+        internal static float ActiveViewPivotHeight()
+        {
+            if (settings == null) return 0f;
+            if (_activeView == 1) return Mathf.Clamp(settings.View1.PivotHeight, PivotMin, PivotMax);
+            if (_activeView == 2) return Mathf.Clamp(settings.View2.PivotHeight, PivotMin, PivotMax);
+            return 0f;
+        }
+
+        // Per-view lateral shoulder offset for whichever preset is currently active (0 if none).
+        internal static float ActiveViewShoulder()
+        {
+            if (settings == null) return 0f;
+            if (_activeView == 1) return Mathf.Clamp(settings.View1.Shoulder, ShoulderMin, ShoulderMax);
+            if (_activeView == 2) return Mathf.Clamp(settings.View2.Shoulder, ShoulderMin, ShoulderMax);
+            return 0f;
+        }
+
+        // Per-view dolly-in distance (toward the focal, fixed FOV) for whichever preset is active (0 if none).
+        internal static float ActiveViewDolly()
+        {
+            if (settings == null) return 0f;
+            if (_activeView == 1) return Mathf.Clamp(settings.View1.Dolly, DollyMin, DollyMax);
+            if (_activeView == 2) return Mathf.Clamp(settings.View2.Dolly, DollyMin, DollyMax);
+            return 0f;
+        }
+
+        // Per-view live-follow flag for whichever preset is active (false if none). In gamepad mode View 1 always
+        // locks the model in frame: the game's native controller camera lets the view pan loosely behind the
+        // character as you move, which reads fine in the wide isometric View 2 but breaks the close over-the-
+        // shoulder framing, so we pin it. View 2 is left on its own setting - its loose follow is wanted there.
+        internal static bool ActiveViewLiveFollow()
+        {
+            if (settings == null) return false;
+            if (_activeView == 1) return settings.View1.LiveFollow || CameraRig_UpdateInternal_Patch.InGamepadMode();
+            if (_activeView == 2) return settings.View2.LiveFollow;
+            return false;
+        }
+
+        // The active preset object (or null if none) - lets the scroll patch tune it live.
+        internal static CameraView ActiveViewObj()
+        {
+            if (settings == null) return null;
+            if (_activeView == 1) return settings.View1;
+            if (_activeView == 2) return settings.View2;
+            return null;
+        }
+
+        // --- Solid walls (per view): while a view with SolidWalls set is active we hold RT's occluder
+        // see-through clip off, so walls and doors in front of the camera stay solid instead of dissolving.
+        // We re-assert the off state every frame (an area load restarts the clip service, which would
+        // otherwise bring the see-through back), and re-enable it once when we leave such a view.
+        // _occluderSuppressed tracks whether we are the ones currently holding it off, so OnToggle can
+        // restore it if the mod is disabled mid-view.
+        static bool _occluderSuppressed;
+
+        static void UpdateOccluderClip()
+        {
+            bool want = ActiveViewObj()?.SolidWalls ?? false;
+            if (CameraRig_UpdateInternal_Patch.InMapMode()) want = false;             // hands off on the system/sector map
+            if (CameraRig_UpdateInternal_Patch.LastHardBind) want = false;            // hand back during hard-bound shots (scripted cinematics)
+            if (CutsceneCameraGate.CameraCutsceneActive()) want = false;              // hand back during in-dialogue scripted camera shots
+            if (want) { OccluderClip.SetGameClipEnabled(false); _occluderSuppressed = true; }
+            else if (_occluderSuppressed) { OccluderClip.SetGameClipEnabled(true); _occluderSuppressed = false; }
+        }
+
+        static void RestoreOccluderClip()
+        {
+            if (!_occluderSuppressed) return;
+            OccluderClip.SetGameClipEnabled(true);
+            _occluderSuppressed = false;
+        }
+
+        // Active view index (0/1/2); exposed so the patch classes can read it for the trace.
+        internal static int ActiveViewNum => _activeView;
+
+        static void OnSaveGUI(UnityModManager.ModEntry modEntry) => settings.Save(modEntry);
+    }
+
+    // Captures each area's default zoom endpoints (set per-area in
+    // ResetCurrentModeSettings) and re-applies them scaled by the user's factors.
+    // normalize 0 = zoomed out (FovMax / PhysicalZoomMin); 1 = zoomed in (FovMin / PhysicalZoomMax).
+    static class ZoomLimits
+    {
+        static float _fovMin, _fovMax, _physMin, _physMax;
+        static bool _captured;
+
+        static object GetZoom(object rig) => Traverse.Create(rig).Property("CameraZoom").GetValue<object>();
+
+        public static void CaptureBaseline(object rig)
+        {
+            var zoom = GetZoom(rig);
+            if (zoom == null) return;
+            var tz = Traverse.Create(zoom);
+            _fovMin = tz.Property("FovMin").GetValue<float>();
+            _fovMax = tz.Property("FovMax").GetValue<float>();
+            _physMin = tz.Property("PhysicalZoomMin").GetValue<float>();
+            _physMax = tz.Property("PhysicalZoomMax").GetValue<float>();
+            _captured = true;
+        }
+
+        public static void Apply(object rig, bool restoreDefault)
+        {
+            if (!_captured) { CaptureBaseline(rig); if (!_captured) return; }
+            var zoom = GetZoom(rig);
+            if (zoom == null) return;
+            var tz = Traverse.Create(zoom);
+
+            float outF = restoreDefault ? 1f : Mathf.Clamp(Main.settings.ZoomOutFactor, Main.ZoomOutMin, Main.ZoomOutMax);
+            float inF  = restoreDefault ? 1f : Mathf.Clamp(Main.settings.ZoomInFactor,  Main.ZoomInMin,  Main.ZoomInMax);
+
+            // FOV mode: wider FOV = more zoomed out, narrower = more zoomed in.
+            tz.Property("FovMax").SetValue(Mathf.Clamp(_fovMax * outF, 5f, 110f));
+            tz.Property("FovMin").SetValue(Mathf.Clamp(_fovMin / inF, 2f, 110f));   // floor lowered from 5 so high zoom-in factors can bite
+
+            // Physical mode (best-effort; flip if a slider feels inverted in-game).
+            tz.Property("PhysicalZoomMin").SetValue(_physMin * outF);
+            tz.Property("PhysicalZoomMax").SetValue(_physMax / inF);
+        }
+    }
+
+    // Widens the angle band the native Mouse3 pitch is clamped to. Both Surface and
+    // Space pairs are set (the orbit clamp reads the Space pair; setting both is safe
+    // and covers whichever the active mode actually uses).
+    static class PitchRange
+    {
+        public static void Apply(object rig, float min, float max)
+        {
+            float lo = Mathf.Clamp(min, Main.PitchHardMin, Main.PitchHardMax);
+            float hi = Mathf.Clamp(max, Main.PitchHardMin, Main.PitchHardMax);
+            if (hi < lo) { float tmp = lo; lo = hi; hi = tmp; }
+            var t = Traverse.Create(rig);
+            Set(t, "MinSurfaceCameraAngle", lo);
+            Set(t, "MaxSurfaceCameraAngle", hi);
+            Set(t, "MinSpaceCameraAngle", lo);
+            Set(t, "MaxSpaceCameraAngle", hi);
+        }
+        static void Set(Traverse t, string field, float v)
+        {
+            var f = t.Field(field);
+            if (f.FieldExists()) f.SetValue(v);
+        }
+    }
+
+    // Drives the Cinemachine virtual-camera lens near/far clip planes. The game only ever
+    // writes FieldOfView to that lens, never the clip planes, so our values persist. The
+    // LensSettings is a struct: read it (boxed), set the field(s), write it back. Also sets
+    // the camera directly as a fallback for any mode without a virtual camera. Near and far
+    // are independent - either may be overridden while the other rides the game's baseline.
+    static class ClipPlane
+    {
+        static float _baseNear, _baseFar;
+        static bool _captured, _customActive, _triedFields, _loggedBase;
+        static FieldInfo _fLens, _fNcp, _fFcp;
+
+        static object GetZoom(object rig) => Traverse.Create(rig).Property("CameraZoom").GetValue<object>();
+        static object GetVcam(object zoom) => zoom == null ? null : Traverse.Create(zoom).Field("m_VirtualCamera").GetValue<object>();
+        static Camera GetCam(object zoom) => zoom == null ? null : Traverse.Create(zoom).Field("m_Camera").GetValue<Camera>();
+
+        static void EnsureFields(object vcam)
+        {
+            if (_triedFields || vcam == null) return;
+            _triedFields = true;
+            _fLens = AccessTools.Field(vcam.GetType(), "m_Lens");
+            if (_fLens != null)
+            {
+                _fNcp = AccessTools.Field(_fLens.FieldType, "NearClipPlane");
+                _fFcp = AccessTools.Field(_fLens.FieldType, "FarClipPlane");
+            }
+            if (_fNcp == null) Main.Log?.Error("Clip: m_Lens.NearClipPlane not found on " + vcam.GetType().Name + " - near clip will be inert.");
+            if (_fFcp == null) Main.Log?.Error("Clip: m_Lens.FarClipPlane not found on " + vcam.GetType().Name + " - far clip will be inert.");
+        }
+
+        static void WriteVcam(object vcam, float near, float far)
+        {
+            if (_fLens == null) return;
+            object lens = _fLens.GetValue(vcam);   // boxed copy of the struct
+            if (_fNcp != null) _fNcp.SetValue(lens, near);
+            if (_fFcp != null) _fFcp.SetValue(lens, far);
+            _fLens.SetValue(vcam, lens);           // write the struct back
+        }
+
+        // Capture the game's untouched near/far once (per-plane: the lens field if present, else the
+        // live camera) and log them so the far range can be calibrated. Never leaves a baseline at zero.
+        static void Capture(object vcam, Camera cam)
+        {
+            if (_captured) return;
+            object l = (vcam != null && _fLens != null) ? _fLens.GetValue(vcam) : null;
+            if (l != null && _fNcp != null) _baseNear = (float)_fNcp.GetValue(l);
+            else if (cam != null) _baseNear = cam.nearClipPlane;
+            if (l != null && _fFcp != null) _baseFar = (float)_fFcp.GetValue(l);
+            else if (cam != null) _baseFar = cam.farClipPlane;
+            if (l != null || cam != null) _captured = true;
+            if (_captured && !_loggedBase)
+            {
+                _loggedBase = true;
+                Main.Log?.Log("Clip baseline (game defaults): near=" + _baseNear.ToString("0.##") + ", far=" + _baseFar.ToString("0.#"));
+            }
+        }
+
+        public static void Apply(object rig, bool nearOn, float nearVal, bool farOn, float farVal)
+        {
+            var zoom = GetZoom(rig);
+            var vcam = GetVcam(zoom);
+            var cam = GetCam(zoom);
+            EnsureFields(vcam);
+            Capture(vcam, cam);
+            float n = nearOn ? Mathf.Clamp(nearVal, Main.NearClipMin, Main.NearClipMax) : _baseNear;
+            float f = farOn ? Mathf.Clamp(farVal, Main.FarClipMin, Main.FarClipMax) : _baseFar;
+            if (vcam != null) WriteVcam(vcam, n, f);
+            if (cam != null) { cam.nearClipPlane = n; cam.farClipPlane = f; }
+            _customActive = true;
+        }
+
+        public static void Restore(object rig)
+        {
+            if (!_customActive || !_captured) return;
+            var zoom = GetZoom(rig);
+            var vcam = GetVcam(zoom);
+            var cam = GetCam(zoom);
+            EnsureFields(vcam);
+            if (vcam != null) WriteVcam(vcam, _baseNear, _baseFar);
+            if (cam != null) { cam.nearClipPlane = _baseNear; cam.farClipPlane = _baseFar; }
+            _customActive = false;
+        }
+    }
+
+    // Toggles RT's occluder see-through - the render-pipeline service that dissolves walls and doors
+    // between the camera and your party so you can see units behind cover. Disabling it leaves that
+    // geometry solid. The lever is the static Owlcat.Runtime.Visual.OcclusionGeometryClip.System.SetEnabled,
+    // which stops/starts the whole clip service; it no-ops when the value is unchanged, so re-asserting it
+    // each frame is cheap. Resolved by reflection so the mod needs no reference to the visual assembly.
+    static class OccluderClip
+    {
+        static MethodInfo _setEnabled;
+        static bool _resolved, _warned;
+
+        static void Resolve()
+        {
+            if (_resolved) return;
+            _resolved = true;
+            var t = AccessTools.TypeByName("Owlcat.Runtime.Visual.OcclusionGeometryClip.System");
+            if (t != null) _setEnabled = AccessTools.Method(t, "SetEnabled", new[] { typeof(bool) });
+            if (_setEnabled == null && !_warned)
+            {
+                _warned = true;
+                Main.Log?.Error("OccluderClip: OcclusionGeometryClip.System.SetEnabled not found - the solid-walls toggle will do nothing.");
+            }
+        }
+
+        // on == true  -> the game's clip service runs (normal see-through)
+        // on == false -> service stopped (walls and doors stay solid)
+        public static void SetGameClipEnabled(bool on)
+        {
+            Resolve();
+            if (_setEnabled == null) return;
+            try { _setEnabled.Invoke(null, new object[] { on }); }
+            catch (Exception e) { Main.Log?.Error("OccluderClip.SetGameClipEnabled failed: " + e); }
+        }
+    }
+
+    // Restore the rig's clean position in the prefix (so the game's follow/scroll
+    // smoothing never sees our framing offset and can't fight it), then re-apply
+    // framing in the postfix purely for the rendered frame. Pitch range + zoom limits
+    // are maintained here too. Rotation is left entirely to the game (native pitch).
+    [HarmonyPatch]
+    static class CameraRig_UpdateInternal_Patch
+    {
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.View.CameraRig:UpdateInternal");
+
+        static bool Prepare()
+        {
+            if (TargetMethod() != null) return true;
+            Main.Log?.Error("Kingmaker.View.CameraRig:UpdateInternal not found - camera adjustments are off.");
+            return false;
+        }
+
+        static Vector3 _cleanPos;
+        static bool _hasClean;
+        static float _followYaw;      // mod-driven slewed follow yaw; overrides the transform while limiting
+        static bool _followYawValid;
+        static float _mlYaw;          // mouselook rendered yaw accumulator (mouse + rate-limited follow)
+        static float _mlPitch;        // mouselook rendered pitch accumulator
+        static float _mlPrevFacing;   // follower facing (m_TargetRotate.y) from last mouselook frame
+        static bool _mlActive;        // was mouselook engaged last frame, to catch enter/exit transitions
+
+        // --- Live-follow anchor: cached handles to the camera's unit follower and the followed entity ---
+        // CameraUnitFollower is a plain class (not a Component) nested in CameraController, so we can't
+        // FindObjectOfType it. Instead a tiny postfix on its Follow/TryFollow hands us the live instance.
+        static object _follower;                                  // CameraController+CameraUnitFollower instance
+        static System.Reflection.FieldInfo _followerEntityField;  // CameraUnitFollower.m_Entity
+        static System.Reflection.PropertyInfo _entityViewTfProp;  // AbstractUnitEntity.ViewTransform (resolved off the live entity type)
+        static System.Type _entityTypeCached;                     // entity type the prop was resolved against
+
+        // Player-API handles (Game.Instance.Player.MainCharacterEntity), resolved lazily and cached.
+        static System.Reflection.MethodInfo _gameInstGetter; static bool _gameInstResolved;
+        static System.Reflection.MethodInfo _playerGetter, _mainCharGetter;
+        static System.Reflection.PropertyInfo _charPosProp; static System.Type _charPosType;
+        static System.Reflection.FieldInfo _selCtrlField; static bool _selCtrlResolved;
+        static System.Reflection.MethodInfo _firstSelGetter; static System.Type _selUnitType; static System.Reflection.PropertyInfo _selUnitPosProp;
+
+        // Called by the follower-capture patch with the live CameraUnitFollower instance.
+        internal static void NotifyFollower(object follower)
+        {
+            if (follower == null) return;
+            if (!ReferenceEquals(_follower, follower))
+            {
+                _follower = follower;
+                _followerEntityField = AccessTools.Field(follower.GetType(), "m_Entity");
+            }
+        }
+
+        // Drop the cached follower so it is re-captured fresh. Called at the start of a save load, after which the
+        // game re-attaches the follow only when the player first takes control - which is exactly the signal we use.
+        internal static void ClearFollower()
+        {
+            _follower = null; _followerEntityField = null;
+            _entityTypeCached = null; _entityViewTfProp = null;
+        }
+
+        // True once the camera follower is live and pointed at a real unit - i.e. the player has taken control and
+        // the follower now drives the focal. Used to know when to stop the on-load recenter and hand off.
+        internal static bool FollowerActive() => TryGetLiveSubjectPos(out _);
+
+        // Resolve the Game singleton once, then reuse it for the player/selection lookups below.
+        static bool TryGetGame(out object game)
+        {
+            game = null;
+            if (!_gameInstResolved)
+            {
+                _gameInstResolved = true;
+                System.Type gt = AccessTools.TypeByName("Kingmaker.Game");
+                if (gt != null) _gameInstGetter = AccessTools.Method(gt, "get_Instance");
+            }
+            if (_gameInstGetter == null) return false;
+            game = _gameInstGetter.Invoke(null, null);
+            return game != null;
+        }
+
+        // The currently selected unit's world position, via Game.Instance.SelectionCharacter.FirstSelectedUnit.
+        // This is what the camera follows, so it is the right thing to frame even in scenes where you are driving
+        // a companion rather than the main character. Null/empty selection returns false (the caller falls back).
+        static bool TryGetSelectedUnitPos(out Vector3 pos)
+        {
+            pos = Vector3.zero;
+            try
+            {
+                if (!TryGetGame(out object game)) return false;
+                if (!_selCtrlResolved) { _selCtrlResolved = true; _selCtrlField = AccessTools.Field(game.GetType(), "SelectionCharacter"); }
+                object sel = _selCtrlField?.GetValue(game);
+                if (sel == null) return false;
+                if (_firstSelGetter == null) _firstSelGetter = AccessTools.Method(sel.GetType(), "get_FirstSelectedUnit");
+                object unit = _firstSelGetter?.Invoke(sel, null);
+                if (unit == null) return false;
+                System.Type ut = unit.GetType();
+                if (!ReferenceEquals(ut, _selUnitType)) { _selUnitType = ut; _selUnitPosProp = AccessTools.Property(ut, "Position"); }
+                if (_selUnitPosProp == null) return false;
+                object pv = _selUnitPosProp.GetValue(unit);
+                if (pv is Vector3) { pos = (Vector3)pv; return pos.sqrMagnitude > 1f; }
+                return false;
+            }
+            catch { return false; }
+        }
+
+        // The party main character's world position, via Game.Instance.Player.MainCharacterEntity.Position.
+        static bool TryGetMainCharacterPos(out Vector3 pos)
+        {
+            pos = Vector3.zero;
+            try
+            {
+                if (!TryGetGame(out object game)) return false;
+                if (_playerGetter == null) _playerGetter = AccessTools.Method(game.GetType(), "get_Player");
+                object player = _playerGetter?.Invoke(game, null);
+                if (player == null) return false;
+                if (_mainCharGetter == null) _mainCharGetter = AccessTools.Method(player.GetType(), "get_MainCharacterEntity");
+                object ent = _mainCharGetter?.Invoke(player, null);
+                if (ent == null) return false;
+                System.Type et = ent.GetType();
+                if (!ReferenceEquals(et, _charPosType)) { _charPosType = et; _charPosProp = AccessTools.Property(et, "Position"); }
+                if (_charPosProp == null) return false;
+                object pv = _charPosProp.GetValue(ent);
+                if (pv is Vector3) { pos = (Vector3)pv; return pos.sqrMagnitude > 1f; }
+                return false;
+            }
+            catch { return false; }
+        }
+
+        // The unit the on-load camera should frame: the selected unit if there is one, else the party main
+        // character. Both are alive from the moment a save finishes loading, unlike the camera follower.
+        static bool TryGetSubjectPos(out Vector3 pos)
+        {
+            if (TryGetSelectedUnitPos(out pos)) return true;
+            return TryGetMainCharacterPos(out pos);
+        }
+
+        // Snap the focal onto the subject (selected unit / main character). On a save load the game parks the
+        // camera on an area establishing shot and only attaches the follow to your character when you first move;
+        // this overrides that so a close/over-the-shoulder View 1 frames the character immediately. Returns true
+        // once it has a valid subject position (so the caller can keep retrying until the unit is positioned);
+        // 'moved' reports whether the focal actually needed shifting this frame, which the load window uses to
+        // tell when the focal has settled. Validity-guarded: a missing/degenerate position leaves the focal alone.
+        internal static bool RecenterFocalOnSubject(out bool moved)
+        {
+            moved = false;
+            try
+            {
+                if (Main.CurrentRig == null) return false;
+                if (!TryGetSubjectPos(out Vector3 target)) return false;
+                var f = Traverse.Create(Main.CurrentRig).Field("m_TargetPosition");
+                Vector3 cur = f.GetValue<Vector3>();
+                if (Vector3.Distance(cur, target) > 0.3f)
+                {
+                    bool big = Vector3.Distance(cur, target) > 1f;
+                    f.SetValue(target);
+                    moved = true;
+                    if (big) Main.Log?.Log(string.Format("Recentered focal on load: {0} -> {1}", cur.ToString("F1"), target.ToString("F1")));
+                }
+                return true;
+            }
+            catch (Exception e) { Main.Log?.Error("Recenter focal failed: " + e); return false; }
+        }
+
+        // Live (undamped) world position of the model the camera follows: follower.m_Entity.ViewTransform.position.
+        // Returns false (leaving the caller on the damped focal) if any link is missing.
+        internal static bool TryGetLiveSubjectPos(out Vector3 pos)
+        {
+            pos = Vector3.zero;
+            try
+            {
+                if (_follower == null || _followerEntityField == null) return false;
+                object entity = _followerEntityField.GetValue(_follower);
+                if (entity == null) return false;
+                System.Type et = entity.GetType();
+                if (!ReferenceEquals(et, _entityTypeCached))
+                {
+                    _entityTypeCached = et;
+                    _entityViewTfProp = AccessTools.Property(et, "ViewTransform");
+                }
+                if (_entityViewTfProp == null) return false;
+                Transform vt = _entityViewTfProp.GetValue(entity) as Transform;
+                if (vt == null) return false;
+                pos = vt.position;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // Clear the mouselook seat after the camera state is set externally (e.g. ApplyView). Next frame the
+        // mouselook block re-seats pitch/yaw from what was just applied, and - critically - the exit-sync branch
+        // will not fire to stamp the previous mouselook angles back over the applied view.
+        internal static void ResetMouselookSeat() { _mlActive = false; }
+
+        static void Prefix(object __instance)
+        {
+            if (!_hasClean) return;
+            if (!Main.Active || __instance == null) { _hasClean = false; return; }
+            var comp = __instance as Component;
+            if (comp == null) { _hasClean = false; return; }
+            comp.transform.position = _cleanPos;   // rotation deliberately untouched
+        }
+
+        static void Postfix(object __instance)
+        {
+            if (__instance == null) return;
+            var comp = __instance as Component;
+            if (comp == null) { _hasClean = false; return; }
+
+            Main.CurrentRig = __instance;
+
+            if (!Main.Active || Main.settings == null)
+            {
+                ZoomLimits.Apply(__instance, restoreDefault: true);
+                ClipPlane.Restore(__instance);
+                _hasClean = false;
+                return;
+            }
+
+            try
+            {
+                var s = Main.settings;
+                var t = Traverse.Create(__instance);
+
+                bool hardBind = t.Field("m_HardBindPositionEnabled").GetValue<bool>();
+
+                // Overworld/system/sector map shares this rig but wants the game's native camera - treat it
+                // like a hard-bound shot so framing, clip and the occluder toggle all stand down.
+                if (InMapMode()) hardBind = true;
+                LastHardBind = hardBind;   // exposed for OnUpdate's occluder gate, which runs outside this postfix
+
+                bool needCut = (s.FramingEnabled && s.FramingPauseInCutscenes)
+                            || (s.ZoomLimitsEnabled && s.ZoomPauseInCutscenes);
+                bool inCut = needCut && InCutscene();
+
+                // Zoom: maintained every frame; reverted when off, hard-bound, or paused.
+                bool zoomRevert = !s.ZoomLimitsEnabled || hardBind || (s.ZoomPauseInCutscenes && inCut);
+                ZoomLimits.Apply(__instance, restoreDefault: zoomRevert);
+
+                // Pitch range: widen the native drag clamp (only affects manual drag).
+                if (s.PitchRangeEnabled && !hardBind)
+                    PitchRange.Apply(__instance, s.MinPitchAngle, s.MaxPitchAngle);
+
+                // Clip planes: per active view, near and far independently. Restore baseline when neither is on.
+                CameraView ccv = Main.ActiveViewObj();
+                bool nearOn = !hardBind && ccv != null && ccv.NearClipEnabled;
+                bool farOn  = !hardBind && ccv != null && ccv.FarClipEnabled;
+                if (nearOn || farOn) ClipPlane.Apply(__instance, nearOn, ccv.NearClip, farOn, ccv.FarClip);
+                else ClipPlane.Restore(__instance);
+
+                // Mouselook: drive the camera straight from the mouse, and fold in the follower's facing
+                // change (the A/D turn) at a rate capped by the active view's multiplier. We keep our own
+                // yaw/pitch accumulators and write ONLY the transform - we deliberately do NOT push the
+                // combined yaw back into m_TargetRotate while looking, so the rig's target stays equal to the
+                // pure follower facing. That keeps the facing reading clean (so we can slow just the A/D part
+                // without touching the mouse) and the rig derives forward/right from the transform, which we
+                // do set, so WASD still moves relative to where you're actually looking.
+                if (!hardBind && Main.MouselookEngaged())
+                {
+                    if (Main.MouselookJustEngaged || !_mlActive)
+                    {
+                        // Entering mouselook: seat the accumulators on the current camera so there is no snap.
+                        Vector3 tr0 = t.Field("m_TargetRotate").GetValue<Vector3>();
+                        _mlYaw = comp.transform.eulerAngles.y;
+                        _mlPitch = tr0.x;
+                        _mlPrevFacing = tr0.y;
+                        _mlActive = true;
+                        Main.MouselookJustEngaged = false;   // drop the first frame's pre-lock delta
+                    }
+                    else
+                    {
+                        float sensX = Mathf.Max(0.01f, s.MouselookSensitivity);
+                        float sensY = Mathf.Max(0.01f, s.MouselookSensY);
+                        float dx = Input.GetAxis("Mouse X") * sensX;
+                        float dy = Input.GetAxis("Mouse Y") * sensY * (s.MouselookInvertY ? 1f : -1f);
+                        float loP = Main.MouselookPitchMin;   // free-look climbs above the horizon; the screen-basis Up-fix keeps movement correct up there
+                        float hiP = Mathf.Clamp(s.MaxPitchAngle, Main.PitchHardMin, Main.PitchHardMax);
+                        if (hiP < loP) { float tmp = loP; loP = hiP; hiP = tmp; }
+
+                        // m_TargetRotate.y is the follower's facing only - we never fold our yaw back into it,
+                        // so it stays clean for the slew read. We DO keep .x (pitch) in step with our accumulator,
+                        // so a view captured mid-mouselook records the pitch you are actually looking at instead
+                        // of a stale value left from before mouselook engaged.
+                        var mlTrf = t.Field("m_TargetRotate");
+                        Vector3 mlTr = mlTrf.GetValue<Vector3>();
+                        float facing = mlTr.y;
+                        float facingDelta = Mathf.DeltaAngle(_mlPrevFacing, facing);
+                        float rotMult = Main.ActiveViewRotMult();
+                        if (rotMult < 0.99f)
+                        {
+                            float maxStep = Main.FollowYawRate * rotMult * Time.deltaTime;
+                            facingDelta = Mathf.Clamp(facingDelta, -maxStep, maxStep);
+                        }
+                        _mlYaw += facingDelta + dx;        // rate-limited A/D turn + full-speed mouse
+                        _mlPitch = Mathf.Clamp(_mlPitch + dy, loP, hiP);
+                        _mlPrevFacing = facing;
+
+                        mlTr.x = _mlPitch;   // pitch stays authoritative in the rig target; yaw left as the facing
+                        mlTr.z = 0f;
+                        mlTrf.SetValue(mlTr);
+                        comp.transform.rotation = Quaternion.Euler(_mlPitch, _mlYaw, 0f);
+                    }
+                }
+                else if (_mlActive)
+                {
+                    // Leaving mouselook: hand the rig its target where the camera actually is, so it does not
+                    // snap to the character's facing on the way out. (_followYaw is already kept synced to the
+                    // transform by the slew block's else-branch every frame, so nothing else to reset here.)
+                    var trf = t.Field("m_TargetRotate");
+                    Vector3 tr = trf.GetValue<Vector3>();
+                    tr.x = _mlPitch; tr.y = _mlYaw; tr.z = 0f;
+                    trf.SetValue(tr);
+                    comp.transform.rotation = Quaternion.Euler(tr);
+                    _mlActive = false;
+                }
+
+                // Gamepad: with mouselook standing aside on a pad, drive View 1's pitch from the right stick Y
+                // and pin zoom here. Because it re-asserts pitch+zoom every frame, this also doubles as the
+                // backstop that holds the view across dialogue/area transitions (no mouselook to carry it on a pad).
+                Main.TickGamepadPitchHold(hardBind);
+
+                // Follow-yaw slew limiter. The A/D turn is the follower ramping m_TargetRotate.y toward the
+                // character facing (measured ~131 deg/s), with the rig's rubber-band tracking it ~3 deg behind;
+                // both confirmed by the trace. We can't slow it by editing the target (the follower overwrites
+                // it inside UpdateInternal before the slerp), so we take over the final transform yaw - the way
+                // mouselook does - and slew it toward the target at a rate capped by the active view's
+                // multiplier. Gated to follower-driven turns only: not a mouse drag, not our mouselook, not a
+                // scripted/cutscene shot. mult >= ~1 (or no active view) leaves the stock turn untouched.
+                // Slowing a follow necessarily lags it, so the camera trails during the turn and finishes
+                // settling just after release; lower mult = slower = more trail.
+                {
+                    var trY = t.Field("m_TargetRotate");
+                    Vector3 trv = trY.GetValue<Vector3>();
+                    float tgtYaw = trv.y;
+                    float xfYaw = comp.transform.eulerAngles.y;
+
+                    float rotMult = Main.ActiveViewRotMult();
+                    bool byMouse = false;
+                    try { byMouse = t.Field("m_RotationByMouse").GetValue<bool>(); } catch { }
+                    bool slew = rotMult < 0.99f && !byMouse && !hardBind && !Main.MouselookEngaged() && !InCutscene();
+
+                    if (slew)
+                    {
+                        if (!_followYawValid) { _followYaw = xfYaw; _followYawValid = true; }
+                        float gap = Mathf.DeltaAngle(_followYaw, tgtYaw);
+                        float maxStep = Main.FollowYawRate * rotMult * Time.deltaTime;
+                        _followYaw += Mathf.Clamp(gap, -maxStep, maxStep);
+                        Vector3 e = comp.transform.eulerAngles;          // keep pitch (x) and roll (z), override yaw only
+                        comp.transform.rotation = Quaternion.Euler(e.x, _followYaw, e.z);
+                        xfYaw = _followYaw;                              // report what we actually rendered
+                    }
+                    else
+                    {
+                        _followYaw = xfYaw; _followYawValid = true;      // stay synced so engaging the limiter is seamless
+                    }
+                }
+
+                // Focus offset: a world-up pivot raise (yaw-independent, so the orbit centre sits at the
+                // character's shoulders and doesn't wander as you turn) plus a lateral shoulder shift along
+                // Right (true over-the-shoulder framing). Applied in every mode now - mouselook on or off
+                // uses the same offset, so dropping out of mouselook (Left Shift, an incidental toggle)
+                // can't make the focus jump. Re-applied every frame so the unit-follower recentering can't
+                // wipe it when you move with WASD.
+                bool inDialog = UIGate.HasDialog() || InDialogMode();
+                DialogFramingMode dmode = s.DialogFraming;
+                bool framingDialogExempt = inDialog && dmode != DialogFramingMode.Off;   // keep the offset through this conversation
+                float ph = Main.ActiveViewPivotHeight();
+                float shoulder = Main.ActiveViewShoulder();
+                float dolly = Main.ActiveViewDolly();
+                // The dolly is tuned for the ~27u gameplay camera distance. In a conversation the game drops the
+                // camera onto a lower base, so the dolly's push along the (downward) view ray drags the framing
+                // onto the feet. In Lift mode we drop the dolly and keep only the gentle pivot/shoulder raise; in
+                // Tactical mode we keep the full dolly but cancel the vertical reframing at the write below, so the
+                // over-the-shoulder shot matches gameplay. (In Off mode the whole offset is paused by the gate.)
+                bool dialogLift = inDialog && dmode == DialogFramingMode.Lift;
+                float effDolly = dialogLift ? 0f : dolly;
+                // Tactical dialogue: the game frames the conversation partner, so the gameplay over-the-shoulder
+                // shift would push *them* off-centre - drop it (the game's own left/right framing still applies).
+                // The vertical framing is taken from the Dialogue framing height slider rather than the gameplay
+                // pivot, because the dolly's downward pull in dialogue is pitch-dependent and no single constant
+                // suits every angle; the base-Y pin at the write still matches gameplay height underneath.
+                bool dialogTactical = inDialog && dmode == DialogFramingMode.Tactical;
+                float effPivot = dialogTactical ? s.DialogVerticalOffset : ph;
+                float effShoulder = dialogTactical ? 0f : shoulder;
+
+                // Live subject position (the model's ViewTransform) - read once per frame for the live-follow
+                // anchor. haveLive stays false (caller falls back to the damped focal) until the follower-capture
+                // patch has handed us the follower and the entity links resolve.
+                Vector3 liveNow = Vector3.zero; bool haveLive = false;
+                if (Main.ActiveViewLiveFollow())
+                    haveLive = TryGetLiveSubjectPos(out liveNow);
+
+                Vector3 baseOffset = Vector3.up * effPivot + t.Property("Right").GetValue<Vector3>() * effShoulder;
+                bool applyOffset = s.FramingEnabled
+                    && (Mathf.Abs(ph) > 0.0001f || Mathf.Abs(shoulder) > 0.0001f || Mathf.Abs(effDolly) > 0.0001f || Main.ActiveViewLiveFollow())
+                    && !(inDialog && dmode == DialogFramingMode.Off)
+                    && (!hardBind || framingDialogExempt)
+                    && !(s.FramingPauseInCutscenes && inCut && !framingDialogExempt)
+                    && !CutsceneCameraGate.CameraCutsceneActive();   // stand the offset down during scripted camera shots
+                if (!applyOffset) { _hasClean = false; return; }
+
+                Transform rigT = comp.transform;
+                _cleanPos = rigT.position;
+                _hasClean = true;
+
+                // Dolly: the rig transform sits ON the focal, and the actual camera is parented to the rig ~27u out
+                // (confirmed by the trace). So to move the camera toward the subject we shift the *rig* along the
+                // camera->focal axis - the camera, being a child, translates the same amount, straight in along its
+                // own view ray. That grows the subject in place (it stays on the ray) and keeps the OTS composition,
+                // exactly like pivot/shoulder which also move the rig. The push is capped just past the subject so a
+                // full dolly can sit at/just past the model (first-person / VR); near-clip culls the model when inside it.
+                Vector3 offset = baseOffset;
+                if (Mathf.Abs(effDolly) > 0.0001f)
+                {
+                    try
+                    {
+                        Camera dollyCam = t.Property("Camera").GetValue<Camera>();
+                        if (dollyCam != null)
+                        {
+                            // Direction: the camera's own forward. It's rotation-derived and smooth (FOV-zoom shows no
+                            // rotational shimmer), whereas (focal - camPos) rides m_TargetPosition, which steps ~0.15u
+                            // per frame with the discrete logic position - feeding THAT into the dolly is what shimmers.
+                            // When stationary the two are identical, so framing is unchanged; they only diverge while moving.
+                            Vector3 viewDir = dollyCam.transform.forward;
+                            // Stop-distance: measure to the live (smooth) subject when we have it, else the focal.
+                            Vector3 subj = (Main.ActiveViewLiveFollow() && haveLive)
+                                ? liveNow : t.Field("m_TargetPosition").GetValue<Vector3>();
+                            float dist = Vector3.Distance(subj, dollyCam.transform.position);   // ~27u
+                            if (dist > 0.01f && viewDir.sqrMagnitude > 0.0001f)
+                            {
+                                float applied = Mathf.Min(effDolly, dist + Main.DollyPast);   // up to just past the subject (full push = first-person/VR)
+                                if (applied > 0f) offset = baseOffset + viewDir.normalized * applied;
+                            }
+                        }
+                    }
+                    catch (Exception de) { Main.Log?.Error("Dolly offset failed: " + de); }
+                }
+
+                // Live-follow anchor: lock the model in frame by shifting the rig onto the subject's live transform.
+                // The rig sits on m_TargetPosition, so adding (live - m_TargetPosition) lands it exactly on the live
+                // model position regardless of any baked focal offset; the framing offsets above then sit on top.
+                // m_TargetPosition is the discrete logic position (steps ~0.15u/frame while moving); the ViewTransform
+                // is the smooth interpolated one the model renders at, so this is what removes the rotational shimmer.
+                if (Main.ActiveViewLiveFollow() && haveLive)
+                {
+                    try
+                    {
+                        Vector3 focalLive = t.Field("m_TargetPosition").GetValue<Vector3>();
+                        Vector3 corr = liveNow - focalLive;
+                        // Sanity guard: a real anchor correction is sub-unit (the model lags the focal ~0.1u). A large
+                        // value means the live position is degenerate - e.g. on a save load an entity not yet positioned,
+                        // or a stale follower handle pointing at a disposed unit, sits at the world origin - so skip it
+                        // rather than fling the rig there. Also covers the one-frame gap during a teleport.
+                        if (corr.sqrMagnitude < 9f) offset += corr;   // skip if > 3u
+                    }
+                    catch (Exception le) { Main.Log?.Error("Live-follow anchor failed: " + le); }
+                }
+
+                // Tactical dialogue mode: the game leans the camera into the conversation by dropping the rig
+                // base (the focal stays put). Cancel just that vertical drop - pin the base height back to the
+                // focal's, its gameplay relationship - so the over-the-shoulder height matches gameplay. X/Z are
+                // left as the game set them, so it can still frame the speakers left/right. The full dolly/pivot/
+                // shoulder offset then sits on top exactly as in gameplay.
+                Vector3 finalBase = _cleanPos;
+                if (inDialog && dmode == DialogFramingMode.Tactical)
+                {
+                    try { finalBase.y = t.Field("m_TargetPosition").GetValue<Vector3>().y; } catch { }
+                }
+                rigT.position = finalBase + offset;
+            }
+            catch (Exception e)
+            {
+                Main.Log?.Error("Camera adjustment failed: " + e);
+                _hasClean = false;
+            }
+        }
+
+        // ---- Game-mode + controller-mode detection (cached reflection, fails safe to "not in that mode") ----
+        static PropertyInfo _piInstance, _piCurrentMode, _piControllerMode;
+        static object _cutscene, _cutsceneGlobalMap, _dialog, _starSystem, _globalMap, _gamepadMode;
+        static bool _modeInit;
+        internal static bool LastHardBind;   // last hardBind (after the map force); read by OnUpdate's occluder gate
+
+        static void InitModes()
+        {
+            if (_modeInit) return;
+            _modeInit = true;
+            var gameType = AccessTools.TypeByName("Kingmaker.Game");
+            if (gameType != null)
+            {
+                _piInstance = AccessTools.Property(gameType, "Instance");
+                _piCurrentMode = AccessTools.Property(gameType, "CurrentMode");
+                // Game.ControllerMode is the game's own Mouse/Gamepad flag - the same signal it branches its
+                // native input and camera behaviour on. Read the Gamepad enum value off the property's own type
+                // so we needn't name the enum's namespace.
+                _piControllerMode = AccessTools.Property(gameType, "ControllerMode");
+                var cmt = _piControllerMode?.PropertyType;
+                if (cmt != null) _gamepadMode = AccessTools.Field(cmt, "Gamepad")?.GetValue(null);
+            }
+            var gmt = AccessTools.TypeByName("Kingmaker.GameModes.GameModeType");
+            if (gmt != null)
+            {
+                _cutscene = AccessTools.Field(gmt, "Cutscene")?.GetValue(null);
+                _cutsceneGlobalMap = AccessTools.Field(gmt, "CutsceneGlobalMap")?.GetValue(null);
+                _dialog = AccessTools.Field(gmt, "Dialog")?.GetValue(null);
+                _starSystem = AccessTools.Field(gmt, "StarSystem")?.GetValue(null);
+                _globalMap = AccessTools.Field(gmt, "GlobalMap")?.GetValue(null);
+            }
+        }
+
+        internal static bool InCutscene()
+        {
+            try
+            {
+                InitModes();
+                if (_piInstance == null || _piCurrentMode == null) return false;
+                var inst = _piInstance.GetValue(null);
+                if (inst == null) return false;
+                var mode = _piCurrentMode.GetValue(inst);
+                if (mode == null) return false;
+                return mode.Equals(_cutscene) || mode.Equals(_cutsceneGlobalMap);
+            }
+            catch { return false; }
+        }
+
+        // True while the game mode is Dialog - a reliable "we're in a conversation" signal, unlike the UI dialog
+        // box flag which drops out during the camera holds/refocuses inside a conversation.
+        internal static bool InDialogMode()
+        {
+            try
+            {
+                InitModes();
+                if (_piInstance == null || _piCurrentMode == null || _dialog == null) return false;
+                var inst = _piInstance.GetValue(null);
+                if (inst == null) return false;
+                var mode = _piCurrentMode.GetValue(inst);
+                return mode != null && mode.Equals(_dialog);
+            }
+            catch { return false; }
+        }
+
+        // True while the game is in a 2.5D map view that shares this rig but wants the game's native camera:
+        // the in-system StarSystem view and the zoomed-out GlobalMap (Koronus Expanse) sector map. Gated like
+        // a hard-bound shot. (GlobalMap is added pre-emptively by name; space combat can join this set once its
+        // mode is known.)
+        internal static bool InMapMode()
+        {
+            try
+            {
+                InitModes();
+                if (_piInstance == null || _piCurrentMode == null) return false;
+                var inst = _piInstance.GetValue(null);
+                if (inst == null) return false;
+                var mode = _piCurrentMode.GetValue(inst);
+                if (mode == null) return false;
+                return (_starSystem != null && mode.Equals(_starSystem))
+                    || (_globalMap  != null && mode.Equals(_globalMap));
+            }
+            catch { return false; }
+        }
+
+        // True while the game is in Gamepad (controller) mode rather than Mouse mode. Drives the controller
+        // exemptions: mouselook stands aside (the stick cannot feed mouse axes), and the per-view rotation
+        // slow-down is bypassed so the right stick turns at stock speed.
+        internal static bool InGamepadMode()
+        {
+            try
+            {
+                InitModes();
+                if (_piInstance == null || _piControllerMode == null || _gamepadMode == null) return false;
+                var inst = _piInstance.GetValue(null);
+                if (inst == null) return false;
+                var mode = _piControllerMode.GetValue(inst);
+                return mode != null && mode.Equals(_gamepadMode);
+            }
+            catch { return false; }
+        }
+    }
+
+    // Capture each area's default zoom endpoints right after the game sets them.
+    [HarmonyPatch]
+    static class CameraRig_ResetCurrentModeSettings_Patch
+    {
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.View.CameraRig:ResetCurrentModeSettings");
+        static bool Prepare() => TargetMethod() != null;
+        static void Postfix(object __instance)
+        {
+            try { ZoomLimits.CaptureBaseline(__instance); }
+            catch (Exception e) { Main.Log?.Error("Zoom baseline capture failed: " + e); }
+        }
+    }
+
+    // When Ctrl is held, the scroll wheel adjusts vertical framing instead of zoom; we
+    // consume the wheel and skip the zoom tick for that frame. Otherwise the game's own
+    // TickZoom runs and zooms within our extended FovMin/FovMax.
+    [HarmonyPatch]
+    static class CameraZoom_TickZoom_Patch
+    {
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.View.CameraZoom:TickZoom");
+        static bool Prepare() => TargetMethod() != null;
+
+        static bool Prefix()
+        {
+            if (!Main.Active || Main.settings == null || !Main.settings.FramingEnabled) return true;
+            if (!(Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl))) return true;
+
+            float scroll = Input.GetAxis("Mouse ScrollWheel");
+            if (Mathf.Abs(scroll) > 0.0001f)
+            {
+                // Ctrl+scroll live-tunes the active view's world-up pivot height; Ctrl+Shift+scroll tunes the
+                // dolly-in distance instead. Only meaningful with a preset active; fixed steps stay in range.
+                CameraView v = Main.ActiveViewObj();
+                if (v != null)
+                {
+                    bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+                    if (shift)
+                        v.Dolly = Mathf.Clamp(v.Dolly + scroll * Main.DollyScrollStep, Main.DollyMin, Main.DollyMax);
+                    else
+                        v.PivotHeight = Mathf.Clamp(v.PivotHeight + scroll * Main.PivotScrollStep, Main.PivotMin, Main.PivotMax);
+                }
+            }
+            return false;   // suppress zoom while Ctrl is held
+        }
+    }
+
+    // Reads RootUIContext to tell whether the player is in plain surface gameplay with no
+    // full-screen window, dialogue, or UI grabbing the cursor - the only state mouselook locks in.
+    static class UIGate
+    {
+        static bool _probed;
+        static PropertyInfo _instance, _isSurface, _hasDialog, _fullScreenType;
+
+        static void Probe()
+        {
+            if (_probed) return;
+            _probed = true;
+            var t = AccessTools.TypeByName("Kingmaker.Code.UI.MVVM.RootUIContext");
+            if (t == null) return;
+            _instance = AccessTools.Property(t, "Instance");
+            _isSurface = AccessTools.Property(t, "IsSurface");
+            _hasDialog = AccessTools.Property(t, "HasDialog");
+            _fullScreenType = AccessTools.Property(t, "FullScreenUIType");
+        }
+
+        public static bool PlainSurface()
+        {
+            try
+            {
+                Probe();
+                if (_instance == null) return false;
+                var ctx = _instance.GetValue(null);
+                if (ctx == null) return false;
+                if (_isSurface != null && !(bool)_isSurface.GetValue(ctx)) return false;
+                if (_hasDialog != null && (bool)_hasDialog.GetValue(ctx)) return false;
+                if (_fullScreenType != null)
+                {
+                    var v = _fullScreenType.GetValue(ctx);
+                    if (v != null && Convert.ToInt32(v) != 0) return false;   // 0 == FullScreenUIType.Unknown (none open)
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // True while a dialogue is open (RT routes dialogue through a cutscene mode, so this is
+        // the signal that distinguishes a conversation from a real cinematic cutscene).
+        public static bool HasDialog()
+        {
+            try
+            {
+                Probe();
+                if (_instance == null || _hasDialog == null) return false;
+                var ctx = _instance.GetValue(null);
+                if (ctx == null) return false;
+                return (bool)_hasDialog.GetValue(ctx);
+            }
+            catch { return false; }
+        }
+    }
+
+    // Read-only probe of ToyBox's "Ctrl + Mouse3 Drag To Adjust Camera Elevation" toggle
+    // (ToyBox.Settings.toggleCameraElevation, reached via EnhancedCamera.Settings). That option
+    // breaks follow-to-unit on load and pans from a map origin, so we surface a warning when it
+    // is on. Fails safe to null (ToyBox absent or field renamed) - no warning, no error.
+    static class ToyBoxProbe
+    {
+        static bool _probed;
+        static PropertyInfo _settingsProp;   // EnhancedCamera.Settings (static)
+        static FieldInfo _elevField;          // ToyBox.Settings.toggleCameraElevation
+
+        static void Probe()
+        {
+            if (_probed) return;
+            _probed = true;
+            var ec = AccessTools.TypeByName("ToyBox.EnhancedCamera");
+            if (ec != null) _settingsProp = AccessTools.Property(ec, "Settings");
+            var st = AccessTools.TypeByName("ToyBox.Settings");
+            if (st != null) _elevField = AccessTools.Field(st, "toggleCameraElevation");
+        }
+
+        public static bool? CtrlElevationOn()
+        {
+            try
+            {
+                Probe();
+                if (_settingsProp == null || _elevField == null) return null;
+                var s = _settingsProp.GetValue(null);
+                if (s == null) return null;
+                return _elevField.GetValue(s) is bool b ? b : (bool?)null;
+            }
+            catch { return null; }
+        }
+    }
+
+    // Tiny centre crosshair drawn while mouselook holds the cursor, so the aim point is visible.
+    public class MouselookCrosshair : MonoBehaviour
+    {
+        void OnGUI()
+        {
+            if (!Main.CursorLocked || Main.settings == null || !Main.settings.MouselookCrosshair) return;
+            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f, len = 10f, th = 2f;
+            var prev = GUI.color;
+            GUI.color = new Color(1f, 1f, 1f, 0.65f);
+            GUI.DrawTexture(new Rect(cx - len, cy - th * 0.5f, len * 2f, th), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(cx - th * 0.5f, cy - len, th, len * 2f), Texture2D.whiteTexture);
+            GUI.color = prev;
+        }
+    }
+
+    // Hides the off-screen *unit* markers - the party-character portrait pointers that
+    // ride the screen edge (the PointMarker system, which also drives co-op ping markers
+    // and objective/locator pointers). Only markers whose Unit is set are touched, so pings
+    // and entity markers (Unit == null) are left alone. Suppression happens at two points
+    // for robustness: the VM's IsVisible state and the view's canvas group.
+    static class OffscreenMarkerHide
+    {
+        public static bool ShouldHide()
+            => Main.Active && Main.settings != null && Main.settings.HideOffscreenUnitMarkers;
+
+        public static bool IsUnitMarker(object vm)
+        {
+            if (vm == null) return false;
+            var f = Traverse.Create(vm).Field("Unit");
+            return f.FieldExists() && f.GetValue() != null;
+        }
+
+        // IsVisible may be a plain bool or a reactive property; handle both.
+        public static void ForceInvisible(object vm)
+        {
+            var f = Traverse.Create(vm).Field("IsVisible");
+            if (!f.FieldExists()) return;
+            var val = f.GetValue();
+            if (val is bool) { f.SetValue(false); return; }
+            if (val != null)
+            {
+                var vp = Traverse.Create(val).Property("Value");
+                if (vp.PropertyExists()) vp.SetValue(false);
+            }
+        }
+    }
+
+    [HarmonyPatch]
+    static class PointMarkerVM_UpdateVisibility_Patch
+    {
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.Code.UI.MVVM.VM.PointMarkers.PointMarkerVM:UpdateVisibility");
+        static bool Prepare() => TargetMethod() != null;
+        static void Postfix(object __instance)
+        {
+            try
+            {
+                if (!OffscreenMarkerHide.ShouldHide()) return;
+                if (!OffscreenMarkerHide.IsUnitMarker(__instance)) return;
+                OffscreenMarkerHide.ForceInvisible(__instance);
+            }
+            catch (Exception e) { Main.Log?.Error("Marker hide (VM) failed: " + e); }
+        }
+    }
+
+    [HarmonyPatch]
+    static class PointMarkerPCView_SetVisibility_Patch
+    {
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.Code.UI.MVVM.View.PointMarkers.PointMarkerPCView:SetVisibility");
+        static bool Prepare() => TargetMethod() != null;
+        static void Postfix(object __instance)
+        {
+            try
+            {
+                if (!OffscreenMarkerHide.ShouldHide()) return;
+                var vm = Traverse.Create(__instance).Property("ViewModel").GetValue<object>();
+                if (!OffscreenMarkerHide.IsUnitMarker(vm)) return;
+                var cg = Traverse.Create(__instance).Field("m_CanvasGroup").GetValue<CanvasGroup>();
+                if (cg != null) { cg.alpha = 0f; cg.blocksRaycasts = false; cg.interactable = false; }
+            }
+            catch (Exception e) { Main.Log?.Error("Marker hide (view) failed: " + e); }
+        }
+    }
+
+    // View-1-on-load: hook the save-load entry points (NOT area transitions) and arm the deferred apply.
+    // Patching all three covers main-menu load, in-game load, and quick-load; whichever fires sets the flag,
+    // and it is consumed once on the next area-did-load, so re-entrancy between them is harmless.
+    [HarmonyPatch]
+    static class Game_LoadGame_Patch
+    {
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            foreach (var n in new[] { "LoadGame", "QuickLoadGame", "LoadGameFromMainMenu" })
+            {
+                var m = AccessTools.Method("Kingmaker.Game:" + n);
+                if (m != null) yield return m;
+            }
+        }
+        static bool Prepare() => AccessTools.Method("Kingmaker.Game:LoadGame") != null;
+        static void Postfix() { Main.NotifyGameLoad(); }
+    }
+
+    // Area finished loading: turn a pending save-load into the View-1 apply countdown (area transitions, which
+    // never set the pending flag, fall straight through and are left alone).
+    [HarmonyPatch]
+    static class CameraRig_OnAreaDidLoad_Patch
+    {
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.View.CameraRig:OnAreaDidLoad");
+        static bool Prepare() => TargetMethod() != null;
+        static void Postfix() { Main.NotifyAreaDidLoad(); }
+    }
+
+    // Captures the live CameraUnitFollower instance as the game establishes or changes the camera's follow
+    // target. CameraUnitFollower is a plain class nested in CameraController (not a Unity component), so it
+    // can't be found via FindObjectOfType; a postfix on its Follow/TryFollow hands us the instance directly.
+    [HarmonyPatch]
+    static class CameraFollower_Capture_Patch
+    {
+        static Type FollowerType()
+        {
+            Type t = AccessTools.TypeByName("Kingmaker.Controllers.Rest.CameraController+CameraUnitFollower");
+            if (t != null) return t;
+            // Namespace metadata read blank for this nested type; fall back to a one-time name scan.
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { foreach (var x in asm.GetTypes()) if (x.Name == "CameraUnitFollower") return x; }
+                catch { }
+            }
+            return null;
+        }
+
+        static bool Prepare() => FollowerType() != null;
+
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            Type ft = FollowerType();
+            if (ft == null) yield break;
+            foreach (var m in AccessTools.GetDeclaredMethods(ft))
+                if ((m.Name == "Follow" || m.Name == "TryFollow") && !m.IsAbstract)
+                    yield return m;
+        }
+
+        static void Postfix(object __instance) => CameraRig_UpdateInternal_Patch.NotifyFollower(__instance);
+    }
+
+
+
+
+    // ------------------------------------------------------------------------------------------------
+    // Camera-cutscene gate.
+    //
+    // In-dialogue scripted shots (e.g. CamOnReceiver) are driven by CommandControlCamera; its OnRun marks the
+    // start. They emit no usable end event - no OnStop/Interrupt/IsFinished on the command, and on the common
+    // path no CutscenePlayerData.Stop/IsFinished either - the camera simply holds the last shot until the
+    // conversation ends. So the gate brackets "first scripted shot -> the game leaves Dialog mode": active is
+    // set on OnRun (only while in dialogue, so gameplay camera commands and ambient barks never trip it) and
+    // cleared by Release() once we are no longer in a dialogue. While active, the framing offset and the
+    // see-through-wall suppression stand down so the authored shot renders. Ordinary dialogue with no scripted
+    // shot never sets it, so custom framing stays live there. Full cutscenes are left to FramingPauseInCutscenes
+    // and the hard-bind standdown, unchanged.
+    static class CutsceneCameraGate
+    {
+        static bool _active;
+        static bool _engaged;       // a scripted shot fired during the current conversation (since the last re-stamp)
+        static bool _prevInDialog;  // last frame's dialogue state, for end-edge detection
+        static float _answerReclaim; // seconds left on the answer debounce; > 0 = a mid-conversation re-stamp is pending
+
+        // After a dialogue advance, wait this long to see whether the next cue brings its own scripted shot before
+        // re-stamping the player's view. Time-based so it holds across frame rates; ~the click-to-OnRun latency.
+        const float AnswerReclaimSeconds = 0.5f;
+
+        internal static bool CameraCutsceneActive() => _active;
+        internal static void Reset() { _active = false; _engaged = false; _prevInDialog = false; _answerReclaim = 0f; }
+
+        // CommandControlCamera.OnRun: a scripted camera shot has begun. Only latch inside a dialogue - a shot in
+        // a full cutscene is governed by the existing cutscene handling, and a stray gameplay-mode camera command
+        // has no dialogue exit to release on. A new shot also cancels any pending answer re-stamp: this beat is
+        // cinematic too, so let it play rather than flashing the player's view between the two shots.
+        internal static void OnCamCommandRun()
+        {
+            if (CameraRig_UpdateInternal_Patch.InDialogMode())
+            {
+                _active = true;
+                _engaged = true;
+                _answerReclaim = 0f;
+                Main.ZeroRigPitchForCutscene();   // base-game shots assume level pitch; hand the camera back at 0
+            }
+        }
+
+        // PlayCue: a new cue is on screen, so the dialogue advanced. Arm the re-stamp debounce only if a scripted
+        // shot ran since the last re-stamp; if this cue carries its own shot, OnCamCommandRun cancels the debounce
+        // before it elapses. Fires for every cue regardless of how the advance happened, so plain continues and
+        // auto-chained cues release the held shot too - not just explicit answer picks.
+        internal static void OnDialogAdvance()
+        {
+            if (_engaged) _answerReclaim = AnswerReclaimSeconds;
+        }
+
+        // Per-frame tick of the mid-conversation re-stamp. When the debounce elapses with no new shot having
+        // superseded it, the next beat is ordinary dialogue, so release the gate as well as re-stamping: the
+        // per-frame framing offset (dolly/shoulder/pivot) and the solid-wall hold both stand down while a shot
+        // owns the camera, and only clearing _active lets them resume. Without it the pitch returns but the
+        // camera stays pulled back and unoccluded - which is what set this apart from the dialogue-end path,
+        // where ReleaseAndCheckReapply already clears _active.
+        internal static bool TickAnswerReclaim(float dt)
+        {
+            if (_answerReclaim <= 0f) return false;
+            _answerReclaim -= dt;
+            if (_answerReclaim <= 0f) { _answerReclaim = 0f; _engaged = false; _active = false; return true; }
+            return false;
+        }
+
+        // Called once per frame. Releases the gate the frame the conversation ends, and returns true on that same
+        // frame when a scripted shot still owned the camera (no answer re-stamp consumed it) - the caller then
+        // re-stamps the active view, because the exit blend restores the game's own pitch/zoom and leaves the
+        // per-frame focus offset layered on the wrong base.
+        internal static bool ReleaseAndCheckReapply(bool inDialog)
+        {
+            if (!inDialog) { _active = false; _answerReclaim = 0f; }
+            bool justEnded = _prevInDialog && !inDialog;
+            _prevInDialog = inDialog;
+            if (justEnded && _engaged) { _engaged = false; return true; }
+            if (!inDialog) _engaged = false;
+            return false;
+        }
+    }
+
+    [HarmonyPatch]
+    static class ControlCamera_OnRun_Gate
+    {
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.AreaLogic.Cutscenes.Commands.CommandControlCamera:OnRun");
+        static bool Prepare() => TargetMethod() != null;
+        static void Postfix() => CutsceneCameraGate.OnCamCommandRun();
+    }
+
+    // The player advancing the dialogue is the only event that brackets an in-dialogue scripted shot (the shots
+    // hold until the next click and fire no Stop/Interrupt/IsFinished of their own). Hook the two-argument
+    // DialogController.PlayCue(BlueprintCueBase) - fires once for every cue actually shown, however the advance
+    // happened (answer pick, continue, or auto-chain). The two SelectAnswer overloads only saw explicit answer
+    // selections and missed plain continues entirely, which is why the per-shot reclaim never armed. Single
+    // private overload, so the name resolves unambiguously without referencing the game's dialogue types.
+    [HarmonyPatch]
+    static class DialogController_PlayCue_Reclaim
+    {
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.Controllers.Dialog.DialogController:PlayCue");
+        static bool Prepare() => TargetMethod() != null;
+        static void Postfix() => CutsceneCameraGate.OnDialogAdvance();
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // Gamepad right-stick capture. Rewired decodes the stick and hands the vector to the exploration input
+    // layer's OnMoveRightStick; we read the already-decoded Y off the second arg (no raw-axis access) and stamp
+    // the frame, so TickGamepadPitchHold can drive View 1's pitch from it. Surface exploration only - that is
+    // where View 1 is used; combat/space layers don't carry this member and would be separate hooks if ever needed.
+    [HarmonyPatch]
+    static class SurfaceRightStick_Capture
+    {
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer:OnMoveRightStick");
+        static bool Prepare() => TargetMethod() != null;
+        static void Postfix(object[] __args)
+        {
+            if (__args != null && __args.Length >= 2 && __args[1] is Vector2 v)
+            {
+                Main.GpRightStickY = v.y;
+                Main.GpRightStickFrame = Time.frameCount;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // WASD/stick movement inversion fix.
+    //
+    // The rig maps stick to a world move as dir = stick.x * CameraRig.Right + stick.y * CameraRig.Up, where Up is
+    // the camera's forward flattened onto the ground. Logged across the horizon, Up FLIPS SIGN the instant the
+    // look crosses level while Right stays put - so the forward axis reverses and "hold W" walks backward above
+    // the horizon. Right is stable, and below the horizon the game's own Up equals Cross(Right, worldUp) exactly;
+    // so we recompute Up as that stable perpendicular. No-op below the horizon (matches the game), corrects the
+    // flipped sign above it - leaving stick movement and edge-scroll consistent at every pitch.
+    [HarmonyPatch]
+    static class CameraRig_ScreenBasis_UpFix
+    {
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.View.CameraRig:FigureOutScreenBasis");
+        static bool Prepare() => TargetMethod() != null;
+        static void Postfix(object __instance)
+        {
+            try
+            {
+                var rig = Traverse.Create(__instance);
+                Vector3 right = rig.Property("Right").GetValue<Vector3>();
+                Vector3 up = Vector3.Cross(right, Vector3.up);   // == game's Up below the horizon; stays put above it
+                float m = up.magnitude;
+                if (m > 1e-4f) rig.Property("Up").SetValue(up / m);
+            }
+            catch (Exception e) { Main.Log?.Error("ScreenBasis Up-fix failed: " + e); }
+        }
+    }
+}
