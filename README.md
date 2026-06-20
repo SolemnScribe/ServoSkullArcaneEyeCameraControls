@@ -70,13 +70,16 @@ tolerate minor game updates; a major camera rewrite by Owlcat could need a new b
   inward to cull distant geometry; it can interact with fog and the skybox, so it's off by default.
   Both are saved per preset and driven through the Cinemachine lens, which the game never overwrites -
   e.g. a high near clip on the flat view, normal on the tactical one.
-- **Camera presets** - two saveable views. Compose one live (drag the angle, zoom, set
-  near clip), press **Set View 1** (or 2) to stamp it, then **Toggle** alternates
-  between them - e.g. a tight over-the-shoulder view and a wide tactical one. **Set** stamps
-  pitch + zoom + near clip; each view also carries its **own pivot height and shoulder offset**
-  (set with the sliders / Ctrl + scroll) and a **zoom slider**, so you can dial the saved zoom in
-  directly instead of re-stamping. Facing is **not** stored, so a view works whichever
-  way you're turned. Views persist.
+- **Camera presets** - two saveable views, plus the option to fold the game's own vanilla camera
+  into the toggle. Compose one live (drag the angle, zoom, set near clip), press **Set View 1**
+  (or 2) to stamp it, then the **Toggle** key cycles between them - e.g. a tight over-the-shoulder
+  view and a wide tactical one. Three checkboxes pick which of **View 1**, **View 2** and **Vanilla**
+  the toggle steps through (default: View 1 and Vanilla, so one key flips between your shoulder cam
+  and the stock camera); switching to Vanilla restores the stock pitch/zoom, keeps your facing, and
+  drops mouselook. **Set** stamps pitch + zoom + near clip; each view also carries its **own pivot
+  height and shoulder offset** (set with the sliders / Ctrl + scroll) and a **zoom slider**, so you
+  can dial the saved zoom in directly instead of re-stamping. Facing is **not** stored, so a view
+  works whichever way you're turned. Views persist.
 - **Hide off-screen character markers** - optional, on by default: suppresses the party-
   portrait pointers that ride the screen edge for off-screen characters, a common side
   effect of the closer framing this mod allows. Co-op ping markers and objective/locator

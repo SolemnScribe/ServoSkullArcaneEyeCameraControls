@@ -65,6 +65,13 @@ namespace ServoSkullCameraControls
         public int GamepadToggleKey = (int)KeyCode.JoystickButton4;   // gamepad view-toggle; defaults to the Xbox Left Bumper (LB). The D-pad reports as an axis, not a button, so Unity's input can't bind it here; rebindable to any pad button in settings
         public bool GamepadInvertPitch = false;  // invert the right-stick pitch on a pad. Off = stick up looks up; on flips it. Needs its own flag, not MouselookInvertY: the stick vector's Y sign is already opposite Unity's Mouse Y, so the same factor reads the other way round on a pad
 
+        // Which targets the toggle key steps through, in the order View 1 -> View 2 -> Vanilla. A preset
+        // is only included when it is also saved; Vanilla is the game's own camera (no preset). Defaults:
+        // View 1 and Vanilla on, View 2 off, so the toggle alternates the over-the-shoulder view and stock.
+        public bool CycleView1   = true;
+        public bool CycleView2   = false;
+        public bool CycleVanilla = true;
+
         // Apply View 1 once when a save is loaded (initial game load), not on area-to-area transitions.
         public bool ApplyView1OnLoad = true;
 
@@ -295,7 +302,14 @@ namespace ServoSkullCameraControls
         public const float DialogHeightMin = 0f, DialogHeightMax = 4f;   // Full-tactical dialogue framing-height slider range (world-up raise)
 
         static int _bindingTarget;   // 0 none; 1 set-view-1; 2 set-view-2; 3 toggle
-        static int _activeView;      // 0 none; 1; 2  (toggle state)
+        static int _activeView;      // 0 none/vanilla; 1; 2  (toggle state)
+
+        // Vanilla-camera baseline: the live free camera (pitch/zoom) recorded while no preset is active,
+        // so a toggle to Vanilla can hand the rig back to a stock-looking framing. Yaw is never stored, so
+        // returning to vanilla doesn't swing the player's facing. Runtime state only; recaptured each session.
+        static bool  _vanillaCaptured;
+        static float _vanillaPitch, _vanillaRoll;
+        static float _vanillaZoomPlayer, _vanillaScroll, _vanillaSmoothScroll;
 
         // Gamepad pitch-hold state (View 1 on a pad): the captured right-stick Y, a held pitch the stick adjusts,
         // and the rate that turns stick deflection into deg/sec. GpRightStick* are written by the input-layer
@@ -342,7 +356,11 @@ namespace ServoSkullCameraControls
         static bool OnToggle(UnityModManager.ModEntry modEntry, bool value)
         {
             Active = value;
-            if (!value) RestoreOccluderClip();   // mod disabled in UMM: re-enable the game's clip if we were holding it off
+            if (!value)
+            {
+                RestoreOccluderClip();   // mod disabled in UMM: re-enable the game's clip if we were holding it off
+                ApplyVanilla();          // and hand the camera back to its stock framing
+            }
             return true;
         }
 
@@ -556,6 +574,7 @@ namespace ServoSkullCameraControls
         static void ApplyView(CameraView v)
         {
             if (CurrentRig == null || v == null || !v.IsSet) return;
+            if (!_vanillaCaptured) CaptureVanillaState(CurrentRig);   // grab the stock camera before the first view overwrites it
             try
             {
                 var t = Traverse.Create(CurrentRig);
@@ -594,6 +613,67 @@ namespace ServoSkullCameraControls
         {
             var f = owner.Field(field);
             if (f.FieldExists()) f.SetValue(val);
+        }
+
+        // Record the live camera (pitch + zoom) as the vanilla baseline. Called from the rig postfix while no
+        // preset is active and we're in normal gameplay, so it always reflects the player's own free camera.
+        internal static void CaptureVanillaState(object rig)
+        {
+            if (rig == null) return;
+            try
+            {
+                var t = Traverse.Create(rig);
+                Vector3 tr = t.Field("m_TargetRotate").GetValue<Vector3>();
+                _vanillaPitch = tr.x;
+                _vanillaRoll  = tr.z;
+                var zoom = t.Property("CameraZoom").GetValue<object>();
+                if (zoom != null)
+                {
+                    var tz = Traverse.Create(zoom);
+                    _vanillaZoomPlayer   = tz.Field("m_PlayerScrollPosition").GetValue<float>();
+                    _vanillaScroll       = tz.Field("m_ScrollPosition").GetValue<float>();
+                    _vanillaSmoothScroll = tz.Field("m_SmoothScrollPosition").GetValue<float>();
+                }
+                _vanillaCaptured = true;
+            }
+            catch (Exception e) { Log?.Error("Capturing vanilla camera state failed: " + e); }
+        }
+
+        // Toggle target: hand the rig back to the vanilla camera. Leaves the active view at 0, which lets the
+        // per-frame loop relax the focus offset and per-view clip on its own; here we additionally snap pitch and
+        // zoom back to the recorded baseline (keeping the current yaw) and drop mouselook / the pad pitch-hold.
+        // The global zoom range and pitch band stay as the user set them - they govern available range, not where
+        // the camera rests, and are re-asserted every frame regardless.
+        static void ApplyVanilla()
+        {
+            _activeView = 0;
+            MouselookActive = false;
+            if (CurrentRig != null && _vanillaCaptured)
+            {
+                try
+                {
+                    var t = Traverse.Create(CurrentRig);
+                    var trF = t.Field("m_TargetRotate");
+                    Vector3 tr = trF.GetValue<Vector3>();
+                    tr.x = _vanillaPitch;   // yaw (tr.y) left as-is so facing is preserved
+                    tr.z = _vanillaRoll;
+                    trF.SetValue(tr);
+                    var comp = CurrentRig as Component;
+                    if (comp != null) comp.transform.rotation = Quaternion.Euler(tr);
+
+                    var zoom = t.Property("CameraZoom").GetValue<object>();
+                    if (zoom != null)
+                    {
+                        var tz = Traverse.Create(zoom);
+                        SetFloat(tz, "m_PlayerScrollPosition", _vanillaZoomPlayer);
+                        SetFloat(tz, "m_ScrollPosition",       _vanillaScroll);
+                        SetFloat(tz, "m_SmoothScrollPosition", _vanillaSmoothScroll);
+                    }
+                }
+                catch (Exception e) { Log?.Error("Applying vanilla camera failed: " + e); }
+            }
+            CameraRig_UpdateInternal_Patch.ResetMouselookSeat();
+            _gpPitchActive = false;
         }
 
         // A scripted in-dialogue shot is taking the camera. The base game has no pitch control and composes
@@ -691,13 +771,26 @@ namespace ServoSkullCameraControls
             catch (Exception e) { Log?.Error("Gamepad pitch-hold failed: " + e); }
         }
 
+        // The toggle key steps through the targets the player ticked, in the fixed order
+        // View 1 -> View 2 -> Vanilla, wrapping around. A preset only takes part when it's actually saved;
+        // Vanilla (0) always takes part when ticked. If the current state isn't in the ring (e.g. its box was
+        // just unticked), we jump to the first ticked target.
         static void ToggleViews()
         {
-            int next = (_activeView == 1) ? 2 : 1;
-            if (next == 1 && !settings.View1.IsSet && settings.View2.IsSet) next = 2;
-            if (next == 2 && !settings.View2.IsSet && settings.View1.IsSet) next = 1;
+            if (settings == null) return;
+
+            var ring = new List<int>(3);
+            if (settings.CycleView1 && settings.View1 != null && settings.View1.IsSet) ring.Add(1);
+            if (settings.CycleView2 && settings.View2 != null && settings.View2.IsSet) ring.Add(2);
+            if (settings.CycleVanilla) ring.Add(0);
+
+            if (ring.Count == 0) { Log?.Log("Toggle pressed, but no cycle targets are enabled (or no view is saved)."); return; }
+
+            int idx  = ring.IndexOf(_activeView);
+            int next = (idx < 0) ? ring[0] : ring[(idx + 1) % ring.Count];
+
+            if (next == 0) { ApplyVanilla(); return; }
             var v = (next == 1) ? settings.View1 : settings.View2;
-            if (!v.IsSet) { Log?.Log("Toggle pressed, but no view is saved yet."); return; }
             ApplyView(v);
             _activeView = next;
         }
@@ -751,6 +844,13 @@ namespace ServoSkullCameraControls
             if (GUILayout.Button(_bindingTarget == 4 ? L("press a pad button\u2026") : L("Bind"), GUILayout.Width(110f))) _bindingTarget = 4;
             if (GUILayout.Button(L("Clear"), GUILayout.Width(70f))) { settings.GamepadToggleKey = (int)KeyCode.None; settings.Save(modEntry); }
             GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     " + L("Toggle cycles:"), GUILayout.Width(150f));
+            settings.CycleView1   = GUILayout.Toggle(settings.CycleView1,   L("View 1"),  GUILayout.Width(80f));
+            settings.CycleView2   = GUILayout.Toggle(settings.CycleView2,   L("View 2"),  GUILayout.Width(80f));
+            settings.CycleVanilla = GUILayout.Toggle(settings.CycleVanilla, L("Vanilla"), GUILayout.Width(90f));
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     " + L("\u2013 the toggle key steps through the ticked targets in order; Vanilla is the game's own camera."));
             settings.GamepadInvertPitch = GUILayout.Toggle(settings.GamepadInvertPitch, "     " + L("Invert gamepad pitch  \u2013 flip the right-stick up/down look direction (View 1 on a pad)"));
             settings.ApplyView1OnLoad = GUILayout.Toggle(settings.ApplyView1OnLoad, "  " + L("Apply View 1 on game load (area-to-area transitions keep the current camera)"));
 
@@ -1440,6 +1540,11 @@ namespace ServoSkullCameraControls
                 bool needCut = (s.FramingEnabled && s.FramingPauseInCutscenes)
                             || (s.ZoomLimitsEnabled && s.ZoomPauseInCutscenes);
                 bool inCut = needCut && InCutscene();
+
+                // While no preset is active and we're in ordinary gameplay (not a scripted/map/cutscene shot),
+                // remember the live camera so a toggle to Vanilla can return here.
+                if (Main.ActiveViewNum == 0 && !hardBind && !InCutscene())
+                    Main.CaptureVanillaState(__instance);
 
                 // Zoom: maintained every frame; reverted when off, hard-bound, or paused.
                 bool zoomRevert = !s.ZoomLimitsEnabled || hardBind || (s.ZoomPauseInCutscenes && inCut);
