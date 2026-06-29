@@ -326,6 +326,12 @@ namespace ServoSkullCameraControls
         static int _bindingTarget;   // 0 none; 1 set-view-1; 2 set-view-2; 3 toggle
         static int _activeView;      // 0 none/vanilla; 1; 2  (toggle state)
 
+        // System/sector map view handoff (see TickMapViewHandoff): on entering a map we drop to the stock camera
+        // so it opens vanilla, remember the player's view, and restore it once back in plain surface gameplay.
+        static bool _wasInMapMode;
+        static int  _viewBeforeMap;
+        static bool _mapRestorePending;
+
         // Vanilla-camera baseline: the live free camera (pitch/zoom) recorded while no preset is active,
         // so a toggle to Vanilla can hand the rig back to a stock-looking framing. Yaw is never stored, so
         // returning to vanilla doesn't swing the player's facing. Runtime state only; recaptured each session.
@@ -413,6 +419,9 @@ namespace ServoSkullCameraControls
             if (_bindingTarget != 0) return;
 
             if (!Active || CurrentRig == null) return;
+
+            // System/sector map: open on the stock camera, restore the player's view on return to the surface.
+            TickMapViewHandoff();
 
             // Hand the camera back once the conversation that owned a scripted shot has ended. If a scripted shot
             // did own it, arm a short delayed re-stamp of the active view: the conversation's exit blend restores
@@ -732,6 +741,39 @@ namespace ServoSkullCameraControls
             }
             CameraRig_UpdateInternal_Patch.ResetMouselookSeat();
             _gpPitchActive = false;
+        }
+
+        // System/sector map handoff. Entering the Koronus Expanse sector map (GlobalMap) or an in-system map
+        // (StarSystem) hands the shared rig to the game's own map camera, but a passive stand-down can leave the
+        // active view's pitch/zoom sitting on the rig (the "StarSystem pitch jump"). So on the way in we actively
+        // drop to the stock camera, remember which view was active, and re-apply it once we're back in ordinary
+        // surface gameplay. The restore is gated on PlainSurface(), not merely "not in map mode", so a cutscene
+        // played over the map (CutsceneGlobalMap flips InMapMode off) can't trigger a premature re-stamp.
+        static void TickMapViewHandoff()
+        {
+            bool inMap = CameraRig_UpdateInternal_Patch.InMapMode();
+
+            if (inMap && !_wasInMapMode)
+            {
+                // Don't clobber a pending restore if a map-cutscene blinked InMapMode off and back while on the map.
+                if (!_mapRestorePending)
+                {
+                    _viewBeforeMap = _activeView;
+                    if (_activeView != 0)
+                    {
+                        ApplyVanilla();          // map opens on the stock camera, not the view's framing
+                        _mapRestorePending = true;
+                    }
+                }
+            }
+            else if (_mapRestorePending && !inMap && UIGate.PlainSurface())
+            {
+                if (_viewBeforeMap == 1) { ApplyView(settings.View1); _activeView = 1; }
+                else if (_viewBeforeMap == 2) { ApplyView(settings.View2); _activeView = 2; }
+                _mapRestorePending = false;
+            }
+
+            _wasInMapMode = inMap;
         }
 
         // A scripted in-dialogue shot is taking the camera. The base game has no pitch control and composes
