@@ -611,12 +611,17 @@ namespace ServoSkullCameraControls
         {
             if (Cursor.lockState != CursorLockMode.Locked) Cursor.lockState = CursorLockMode.Locked;
             if (Cursor.visible) Cursor.visible = false;
-            // Belt against the UI framework re-showing the hardware cursor on stray frames (a framerate-tied race
-            // we can't reliably out-order, and whose per-frame writer lives outside this assembly): a transparent
-            // cursor texture renders nothing regardless of visible/lockState, so any stray show is invisible. The
-            // game overrides it on hover; we re-apply it each phase we run. Restored to the game's own on release.
-            Cursor.SetCursor(BlankCursorTex(), Vector2.zero, CursorMode.Auto);
-            _cursorBlanked = true;
+            // WotR only: belt against the UI framework re-showing the hardware cursor on stray frames (a
+            // framerate-tied race we can't reliably out-order, and whose per-frame writer lives outside this
+            // assembly): a transparent cursor texture renders nothing regardless of visible/lockState, so any
+            // stray show is invisible. The game overrides it on hover; we re-apply it each phase we run, and
+            // restore the game's own on release. RT never showed the cursor through the crosshair (lockState
+            // Locked sufficed), so we leave its cursor texture untouched - no swap, nothing to restore.
+            if (Compat.Ui == Compat.UiKind.WotR)
+            {
+                Cursor.SetCursor(BlankCursorTex(), Vector2.zero, CursorMode.Auto);
+                _cursorBlanked = true;
+            }
         }
 
         // Re-assert the hardware cursor hold after the game's own cursor logic. Called from a high-execution-order
