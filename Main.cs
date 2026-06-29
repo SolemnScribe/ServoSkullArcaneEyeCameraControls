@@ -291,6 +291,8 @@ namespace ServoSkullCameraControls
         public static bool CursorLocked;          // true while we hold the cursor at centre (for the crosshair)
         public static bool MouselookJustEngaged;  // swallow one frame of mouse delta on (re)engage to avoid a jump
         static bool _weLockedCursor;              // we, not the game, put the cursor into Locked
+        static Texture2D _blankCursor;            // fully transparent cursor texture, swapped in while we hold the cursor
+        static bool _cursorBlanked;               // we've swapped in the transparent cursor (restore on release)
 
         // Public accessor for sibling mods to read by reflection (the same way RTVR reads CursorLocked): the live
         // world position of the subject the camera orbits - the focal, taken from the follower entity's
@@ -413,6 +415,7 @@ namespace ServoSkullCameraControls
         {
             SuppressForeignCameraPatches();
             UpdateCursorLock();
+            if (Active) ToyBoxProbe.EnforceCtrlElevationOff();   // force ToyBox's floor-clipping camera-elevation option off while we drive the camera
 
             if (settings == null) return;
             if (_bindingTarget == 4) { ScanGamepadBind(); return; }   // armed for a gamepad button: IMGUI key events can't see JoystickButtons, so poll them here
@@ -561,6 +564,7 @@ namespace ServoSkullCameraControls
             if (!UIGate.PlainSurface()) return false;
             if (CameraRig_UpdateInternal_Patch.InCutscene()) return false;
             if (CameraRig_UpdateInternal_Patch.InDialogMode()) return false;    // WotR routes dialogue through GameModeType.Dialog; yield the cursor for it (harmless on RT, which yields via the cutscene path)
+            if (CameraRig_UpdateInternal_Patch.InMenuMode()) return false;      // esc/pause menu, full-screen UI, bug report, photo mode, rest - the cursor is needed there
             if (CameraRig_UpdateInternal_Patch.InGamepadMode()) return false;   // stick can't drive mouse axes; let the game's native look run
             return true;
         }
@@ -570,20 +574,57 @@ namespace ServoSkullCameraControls
         static void UpdateCursorLock()
         {
             bool engaged = MouselookEngaged();
+
             if (engaged)
             {
-                if (Cursor.lockState != CursorLockMode.Locked) Cursor.lockState = CursorLockMode.Locked;
-                if (Cursor.visible) Cursor.visible = false;
+                AssertCursorHidden();
                 if (!_weLockedCursor) MouselookJustEngaged = true;   // ignore the delta accrued before the lock
                 _weLockedCursor = true;
             }
             else if (_weLockedCursor)
             {
+                // Release immediately. Disengage is driven by deliberate, multi-frame states (free-cursor key held,
+                // dialogue, UI, gamepad) - not 1-frame noise - so there's nothing to debounce, and holding through
+                // a free-cursor press would fight the game's cursor reveal and flicker.
                 Cursor.lockState = CursorLockMode.None;
                 Cursor.visible = true;
+                if (_cursorBlanked) { Cursor.SetCursor(null, Vector2.zero, CursorMode.Auto); _cursorBlanked = false; }   // restore; game re-skins its cursor on the next update
                 _weLockedCursor = false;
             }
             CursorLocked = engaged;
+        }
+
+        // A fully transparent 2x2 cursor texture, built once. Swapped in while mouselook holds the cursor.
+        static Texture2D BlankCursorTex()
+        {
+            if (_blankCursor == null)
+            {
+                _blankCursor = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                var clear = new Color(0f, 0f, 0f, 0f);
+                _blankCursor.SetPixels(new[] { clear, clear, clear, clear });
+                _blankCursor.Apply();
+            }
+            return _blankCursor;
+        }
+
+        static void AssertCursorHidden()
+        {
+            if (Cursor.lockState != CursorLockMode.Locked) Cursor.lockState = CursorLockMode.Locked;
+            if (Cursor.visible) Cursor.visible = false;
+            // Belt against the UI framework re-showing the hardware cursor on stray frames (a framerate-tied race
+            // we can't reliably out-order, and whose per-frame writer lives outside this assembly): a transparent
+            // cursor texture renders nothing regardless of visible/lockState, so any stray show is invisible. The
+            // game overrides it on hover; we re-apply it each phase we run. Restored to the game's own on release.
+            Cursor.SetCursor(BlankCursorTex(), Vector2.zero, CursorMode.Auto);
+            _cursorBlanked = true;
+        }
+
+        // Re-assert the hardware cursor hold after the game's own cursor logic. Called from a high-execution-order
+        // LateUpdate and from an end-of-frame coroutine (the game's UpdateCursorMode coroutine sets lockState at
+        // WaitForEndOfFrame, after LateUpdate), so we re-hide in whichever phase the game last touched it.
+        internal static void CursorLateAssert()
+        {
+            try { if (CursorLocked) AssertCursorHidden(); } catch { }
         }
 
         // Strip any non-ours prefix off CameraZoom.TickZoom - that is ToyBox's FOV
@@ -2087,7 +2128,17 @@ namespace ServoSkullCameraControls
                 if (Main.ActiveViewLiveFollow())
                     haveLive = TryGetLiveSubjectPos(out liveNow);
 
-                Vector3 baseOffset = Vector3.up * effPivot + t.Property("Right").GetValue<Vector3>() * effShoulder;
+                // Shoulder shifts along the camera's horizontal facing-right so it tracks the view as you
+                // turn. RT's CameraRig.Right is exactly that (set in FigureOutScreenBasis from the live camera),
+                // but WotR populates Right from a scroll-projection basis that doesn't follow our yaw, so it
+                // reads world-fixed ("relative to north"). Derive it from the live camera in both games - this
+                // reproduces RT's value identically (RT unchanged) and makes the WotR shoulder camera-relative.
+                Camera shCam = null;
+                try { shCam = t.Property("Camera").GetValue<Camera>(); } catch { }
+                Vector3 shRight = (shCam != null)
+                    ? Vector3.ProjectOnPlane(shCam.transform.right, Vector3.up).normalized
+                    : t.Property("Right").GetValue<Vector3>();   // fallback = prior behaviour if the camera is unavailable
+                Vector3 baseOffset = Vector3.up * effPivot + shRight * effShoulder;
                 bool applyOffset = s.FramingEnabled
                     && (Mathf.Abs(ph) > 0.0001f || Mathf.Abs(shoulder) > 0.0001f || Mathf.Abs(effDolly) > 0.0001f || Main.ActiveViewLiveFollow())
                     && !(inDialog && dmode == DialogFramingMode.Off)
@@ -2175,6 +2226,7 @@ namespace ServoSkullCameraControls
         // ---- Game-mode + controller-mode detection (cached reflection, fails safe to "not in that mode") ----
         static PropertyInfo _piInstance, _piCurrentMode, _piControllerMode;
         static object _cutscene, _cutsceneGlobalMap, _dialog, _starSystem, _globalMap, _gamepadMode;
+        static object _escMode, _fullScreenUi, _bugReport, _gameOver, _photoMode, _rest;   // menu / full-screen UI modes - mouselook yields the cursor for these
         static bool _modeInit;
         internal static bool LastHardBind;   // last hardBind (after the map force); read by OnUpdate's occluder gate
 
@@ -2202,6 +2254,14 @@ namespace ServoSkullCameraControls
                 _dialog = AccessTools.Field(gmt, "Dialog")?.GetValue(null);
                 _starSystem = AccessTools.Field(gmt, "StarSystem")?.GetValue(null);
                 _globalMap = AccessTools.Field(gmt, "GlobalMap")?.GetValue(null);
+                // Menu / full-screen UI modes that need the mouse cursor. Any name absent on the running game
+                // resolves to null and is skipped by InMenuMode (mode.Equals(null) is false), so this is cross-game safe.
+                _escMode = AccessTools.Field(gmt, "EscMode")?.GetValue(null);
+                _fullScreenUi = AccessTools.Field(gmt, "FullScreenUi")?.GetValue(null);
+                _bugReport = AccessTools.Field(gmt, "BugReport")?.GetValue(null);
+                _gameOver = AccessTools.Field(gmt, "GameOver")?.GetValue(null);
+                _photoMode = AccessTools.Field(gmt, "PhotoMode")?.GetValue(null);
+                _rest = AccessTools.Field(gmt, "Rest")?.GetValue(null);
             }
         }
 
@@ -2245,6 +2305,26 @@ namespace ServoSkullCameraControls
                 if (inst == null) return false;
                 var mode = _piCurrentMode.GetValue(inst);
                 return mode != null && mode.Equals(_dialog);
+            }
+            catch { return false; }
+        }
+
+        // True when the current game mode is a menu or full-screen UI that needs the mouse cursor: the Esc/pause
+        // menu (EscMode), any full-screen window, bug report, game-over, photo mode, or the rest UI. Mouselook
+        // yields the cursor for these. (Service windows / save-load / modals are already caught by PlainSurface;
+        // this adds the Esc menu and other full-screen modes that aren't ServiceWindowsType values.)
+        internal static bool InMenuMode()
+        {
+            try
+            {
+                InitModes();
+                if (_piInstance == null || _piCurrentMode == null) return false;
+                var inst = _piInstance.GetValue(null);
+                if (inst == null) return false;
+                var mode = _piCurrentMode.GetValue(inst);
+                if (mode == null) return false;
+                return mode.Equals(_escMode) || mode.Equals(_fullScreenUi) || mode.Equals(_bugReport)
+                    || mode.Equals(_gameOver) || mode.Equals(_photoMode) || mode.Equals(_rest);
             }
             catch { return false; }
         }
@@ -2492,11 +2572,49 @@ namespace ServoSkullCameraControls
             }
             catch { return null; }
         }
+
+        // Auto-disable: ToyBox's "Ctrl + Mouse3 Drag To Adjust Camera Elevation" makes the camera load at a map
+        // origin and clip through the floor while moving under our camera control - a game-breaking combination,
+        // so we force it off whenever we're active rather than only warning. Re-asserted each frame so it stays
+        // off even if ToyBox reloads its settings; if the user disables our mod the option is theirs again. Logs
+        // once. Fails safe to a no-op (ToyBox absent, field renamed, or not writable).
+        static bool _loggedElevDisable;
+        public static void EnforceCtrlElevationOff()
+        {
+            try
+            {
+                Probe();
+                if (_settingsProp == null || _elevField == null) return;
+                var s = _settingsProp.GetValue(null);
+                if (s == null) return;
+                if (_elevField.GetValue(s) is bool b && b)
+                {
+                    _elevField.SetValue(s, false);
+                    if (!_loggedElevDisable)
+                    {
+                        Main.Log?.Log("ToyBox: disabled \"Ctrl + Mouse3 Drag To Adjust Camera Elevation\" - it clips the camera through the floor under our camera control.");
+                        _loggedElevDisable = true;
+                    }
+                }
+            }
+            catch { }
+        }
     }
 
     // Tiny centre crosshair drawn while mouselook holds the cursor, so the aim point is visible.
+    [DefaultExecutionOrder(31000)]   // LateUpdate runs after the game's own per-frame cursor logic so our hold/hide wins
     public class MouselookCrosshair : MonoBehaviour
     {
+        // WotR's UpdateCursorMode coroutine sets Cursor.lockState at WaitForEndOfFrame - after LateUpdate - so we
+        // also re-assert the hold at end of frame to close that last gap. Idempotent with the LateUpdate re-assert.
+        System.Collections.IEnumerator Start()
+        {
+            var eof = new WaitForEndOfFrame();
+            while (true) { yield return eof; Main.CursorLateAssert(); }
+        }
+
+        void LateUpdate() => Main.CursorLateAssert();
+
         void OnGUI()
         {
             if (!Main.CursorLocked || Main.settings == null || !Main.settings.MouselookCrosshair) return;
@@ -2771,9 +2889,12 @@ namespace ServoSkullCameraControls
 
     // ------------------------------------------------------------------------------------------------
     // Gamepad right-stick capture. Rewired decodes the stick and hands the vector to the exploration input
-    // layer's OnMoveRightStick; we read the already-decoded Y off the second arg (no raw-axis access) and stamp
-    // the frame, so TickGamepadPitchHold can drive View 1's pitch from it. Surface exploration only - that is
-    // where View 1 is used; combat/space layers don't carry this member and would be separate hooks if ever needed.
+    // layer's OnMoveRightStick(InputActionEventData, Vector2); we read the already-decoded Y off the Vector2
+    // (no raw-axis access) and stamp the frame, so TickGamepadPitchHold can drive View 1's pitch from it.
+    // Both RT (SurfaceMainInputLayer) and WotR (InGameInputLayer) put the stick vector at argument index 1,
+    // verified against both assemblies, so we bind it positionally as __1. (We deliberately avoid the __args
+    // all-arguments injection: the older Harmony bundled with WotR doesn't support it and throws at patch time.)
+    // Surface exploration only - that is where View 1 is used; combat/space layers would be separate hooks.
     [HarmonyPatch]
     static class SurfaceRightStick_Capture
     {
@@ -2781,19 +2902,10 @@ namespace ServoSkullCameraControls
             AccessTools.Method("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer:OnMoveRightStick")
             ?? AccessTools.Method("Kingmaker.UI._ConsoleUI.InputLayers.InGameLayer.InGameInputLayer:OnMoveRightStick");
         static bool Prepare() => TargetMethod() != null;
-        static void Postfix(object[] __args)
+        static void Postfix(Vector2 __1)
         {
-            if (__args == null) return;
-            // RT passes the decoded stick vector as arg 1; WotR's layer may order it differently, so fall
-            // back to the first Vector2 in the args. Either way we want its y for View 1's pitch-hold.
-            object a = (__args.Length >= 2 && __args[1] is Vector2) ? __args[1] : null;
-            if (a == null)
-                foreach (var x in __args) if (x is Vector2) { a = x; break; }
-            if (a is Vector2 v)
-            {
-                Main.GpRightStickY = v.y;
-                Main.GpRightStickFrame = Time.frameCount;
-            }
+            Main.GpRightStickY = __1.y;
+            Main.GpRightStickFrame = Time.frameCount;
         }
     }
 
