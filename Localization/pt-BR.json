@@ -75,6 +75,7 @@
     "rotate speed (1 = stock): ": "velocidade de rotação (1 = padrão): ",
     "near clip": "plano próximo",
     "far clip": "plano distante",
-    "solid walls  – stop walls/doors dissolving in front of the camera in this view": "paredes sólidas  – impede que paredes/portas se dissolvam diante da câmera nesta visão"
+    "solid walls  – stop walls/doors dissolving in front of the camera in this view": "paredes sólidas  – impede que paredes/portas se dissolvam diante da câmera nesta visão",
+    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "cursor de mira livre (gamepad)  – no controle de cursor, o analógico esquerdo move o ponteiro pela tela em vez de dar panorâmica na câmera"
   }
 }

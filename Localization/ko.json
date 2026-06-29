@@ -75,6 +75,7 @@
     "rotate speed (1 = stock): ": "회전 속도 (1 = 기본): ",
     "near clip": "근거리 클립",
     "far clip": "원거리 클립",
-    "solid walls  – stop walls/doors dissolving in front of the camera in this view": "단단한 벽  – 이 시점에서 카메라 앞의 벽/문이 사라지는 것을 방지합니다"
+    "solid walls  – stop walls/doors dissolving in front of the camera in this view": "단단한 벽  – 이 시점에서 카메라 앞의 벽/문이 사라지는 것을 방지합니다",
+    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "자유 조준 커서 (게임패드)  – 커서 조작 중에는 왼쪽 스틱이 카메라를 패닝하는 대신 포인터를 화면에서 움직입니다"
   }
 }

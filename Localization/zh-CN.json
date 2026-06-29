@@ -75,6 +75,7 @@
     "rotate speed (1 = stock): ": "旋转速度（1 = 原版）：",
     "near clip": "近裁剪面",
     "far clip": "远裁剪面",
-    "solid walls  – stop walls/doors dissolving in front of the camera in this view": "实体墙  – 防止此视角中墙壁/门在镜头前消隐"
+    "solid walls  – stop walls/doors dissolving in front of the camera in this view": "实体墙  – 防止此视角中墙壁/门在镜头前消隐",
+    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "自由瓄准光标（手柄）  – 在光标控制下，左摇杆在屏幕上移动指针，而非平移镜头"
   }
 }

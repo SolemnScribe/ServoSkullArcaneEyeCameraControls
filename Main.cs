@@ -38,6 +38,7 @@ namespace ServoSkullCameraControls
         public float DialogHeight = 1.3f;    // Full-tactical dialogue: world-up framing height for this view (was the global DialogVerticalOffset)
         public bool  DialogZoomEnabled = false; // pin a fixed zoom in Full-tactical dialogue for this view (off = the view's own zoom carries through)
         public float DialogZoom = 0.4f;       // the pinned dialogue zoom (scroll position 0..1) when DialogZoomEnabled
+        public bool PadFreeAimCursor = false; // gamepad cursor control: drive the on-screen pointer with the left stick instead of flying the camera, leaving the camera fixed (RT surface exploration, cursor mode only)
     }
 
     public class Settings : UnityModManager.ModSettings
@@ -48,6 +49,7 @@ namespace ServoSkullCameraControls
         public DialogFramingMode DialogFraming = DialogFramingMode.Tactical;   // behaviour during RT Dialog mode (see enum)
         public float DialogVerticalOffset = 1.3f;   // LEGACY: the old single global dialogue height; kept only so it still deserializes for the one-time migration into each view's DialogHeight. No longer shown or used at runtime.
         public bool  DialogFramingMigrated = false;  // set once DialogVerticalOffset has been copied into the per-view DialogHeight fields
+        public bool  PadFreeAimMigrated = false;      // set once the new per-view PadFreeAimCursor default has been seeded (View 1 on)
 
         // --- Pitch range (widens the band the native Mouse3 drag is clamped to) ---
         public bool PitchRangeEnabled = true;
@@ -62,7 +64,7 @@ namespace ServoSkullCameraControls
 
         // --- Presets ---
         // Defaults seeded from a tuned setup: View 1 close over-the-shoulder (mouselook + dolly), View 2 wide tactical.
-        public CameraView View1 = new CameraView { IsSet = true, Pitch = 37.3301f, Zoom = 0.4f, NearClip = 1.5f, NearClipEnabled = false, Mouselook = true, RotateSpeedMult = 0.1f, PivotHeight = 1.9f, Shoulder = 0.4f, Dolly = 25.5f, LiveFollow = false, SolidWalls = true };
+        public CameraView View1 = new CameraView { IsSet = true, Pitch = 37.3301f, Zoom = 0.4f, NearClip = 1.5f, NearClipEnabled = false, Mouselook = true, RotateSpeedMult = 0.1f, PivotHeight = 1.9f, Shoulder = 0.4f, Dolly = 25.5f, LiveFollow = false, SolidWalls = true, PadFreeAimCursor = true };
         public CameraView View2 = new CameraView { IsSet = true, Pitch = -1.05517578f, Zoom = 0.3f, NearClip = 5f, NearClipEnabled = true, FarClip = 4000f, FarClipEnabled = true, Mouselook = false, RotateSpeedMult = 1.5f, PivotHeight = 0f, Shoulder = 0.4f, Dolly = 15f, LiveFollow = false, SolidWalls = false };
         public int SetView1Key = (int)KeyCode.Keypad7;
         public int SetView2Key = (int)KeyCode.Keypad9;
@@ -361,6 +363,12 @@ namespace ServoSkullCameraControls
                 settings.View1.DialogHeight = settings.DialogVerticalOffset;
                 settings.View2.DialogHeight = settings.DialogVerticalOffset;
                 settings.DialogFramingMigrated = true;
+                settings.Save(modEntry);
+            }
+            if (!settings.PadFreeAimMigrated)   // one-time: seed the new gamepad free-aim cursor default (View 1 on, View 2 off) for existing installs
+            {
+                settings.View1.PadFreeAimCursor = true;
+                settings.PadFreeAimMigrated = true;
                 settings.Save(modEntry);
             }
             Localization.Init(modEntry);   // pick the language file matching the game's current locale
@@ -892,6 +900,65 @@ namespace ServoSkullCameraControls
             catch (Exception e) { Log?.Error("Gamepad direct-control on load failed: " + e); return true; }
         }
 
+        // ---- Gamepad free-aim cursor (per-view) -----------------------------------------------------------
+        // In RT surface cursor control, the stock left stick scrolls the camera and the on-screen pointer is
+        // pinned to centre (the game's SurfaceMainInputLayer.UpdateLeftStickMovement takes its SetToCenter
+        // branch). With a view's PadFreeAimCursor ticked we instead leave the camera where character control
+        // left it and drive the pointer directly: ConsoleCursor.MoveCursor moves the same pointer the mouse
+        // uses, clamped to screen, so interactions resolve at the cursor exactly as a mouse click would. Only
+        // the left-stick path is touched; the right stick keeps its normal camera rotate/pitch.
+        static bool _ccInit;
+        static Type _ccType;
+        static PropertyInfo _ccInstanceProp;
+        static MethodInfo _ccMoveCursor;
+
+        static void InitConsoleCursorReflection()
+        {
+            if (_ccInit) return;
+            _ccInit = true;
+            _ccType = AccessTools.TypeByName("Kingmaker.UI.Pointer.ConsoleCursor");
+            if (_ccType != null)
+            {
+                _ccInstanceProp = AccessTools.Property(_ccType, "Instance");      // static singleton
+                _ccMoveCursor   = AccessTools.Method(_ccType, "MoveCursor");   // single overload on ConsoleCursor; takes the stick delta (Vector2)
+            }
+        }
+
+        // The active view's free-aim flag (false on Vanilla / no active view).
+        static bool PadFreeAimViewEnabled()
+        {
+            if (settings == null) return false;
+            if (_activeView == 1) return settings.View1 != null && settings.View1.PadFreeAimCursor;
+            if (_activeView == 2) return settings.View2 != null && settings.View2.PadFreeAimCursor;
+            return false;
+        }
+
+        // True once it has handled the left stick for free-aim (the caller then skips the stock camera-pan
+        // path). Active only when: the mod is on, the active view's free-aim is ticked, we're on a pad in
+        // plain surface gameplay, and the layer is in cursor control (CursorEnabled). In direct character
+        // control, on Vanilla, or off a pad, this returns false and the stock behaviour runs untouched.
+        internal static bool TryPadFreeAimLeftStick(object layer)
+        {
+            try
+            {
+                if (!Active || settings == null || layer == null) return false;
+                if (!PadFreeAimViewEnabled()) return false;
+                if (!CameraRig_UpdateInternal_Patch.InGamepadMode()) return false;
+                if (!UIGate.PlainSurface()) return false;
+                if (!TryReadCursorEnabled(layer, out bool cursorEnabled) || !cursorEnabled) return false;
+
+                InitConsoleCursorReflection();
+                if (_ccInstanceProp == null || _ccMoveCursor == null) return false;
+                var cursor = _ccInstanceProp.GetValue(null);
+                if (cursor == null) return false;
+
+                Vector2 stick = Traverse.Create(layer).Field("m_LeftStickVector").GetValue<Vector2>();
+                _ccMoveCursor.Invoke(cursor, new object[] { stick });   // moves the pointer by stick*MoveSpeed, clamped to screen
+                return true;
+            }
+            catch (Exception e) { Log?.Error("Gamepad free-aim left stick failed: " + e); return false; }
+        }
+
         // The toggle key steps through the targets the player ticked, in the fixed order
         // View 1 -> View 2 -> Vanilla, wrapping around. A preset only takes part when it's actually saved;
         // Vanilla (0) always takes part when ticked. If the current state isn't in the ring (e.g. its box was
@@ -1156,6 +1223,9 @@ namespace ServoSkullCameraControls
 
             // Solid walls for this view.
             v.SolidWalls = GUILayout.Toggle(v.SolidWalls, "  " + L("solid walls  \u2013 stop walls/doors dissolving in front of the camera in this view"));
+
+            // Gamepad free-aim cursor for this view (RT surface, cursor control only).
+            v.PadFreeAimCursor = GUILayout.Toggle(v.PadFreeAimCursor, "  " + L("free-aim cursor (gamepad)  \u2013 in cursor control, the left stick moves the pointer in screen space instead of panning the camera"));
 
             GUILayout.Space(10f);
         }
@@ -2683,6 +2753,21 @@ namespace ServoSkullCameraControls
                 Main.GpRightStickFrame = Time.frameCount;
             }
         }
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // Gamepad free-aim cursor (per-view). RT surface exploration drives both the camera pan and the centred
+    // pointer from the left stick inside UpdateLeftStickMovement. When the active view has PadFreeAimCursor
+    // ticked and we're in cursor control on a pad, we skip that method and move the pointer ourselves, so the
+    // camera stays put and the left stick free-aims the cursor. RT-only: WotR has no SurfaceMainInputLayer,
+    // so TargetMethod is null there and the class is skipped. The right stick is left to its normal camera use.
+    [HarmonyPatch]
+    static class SurfaceLeftStick_FreeAimPatch
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer:UpdateLeftStickMovement");
+        static bool Prepare() => TargetMethod() != null;
+        static bool Prefix(object __instance) => !Main.TryPadFreeAimLeftStick(__instance);
     }
 
     // ------------------------------------------------------------------------------------------------

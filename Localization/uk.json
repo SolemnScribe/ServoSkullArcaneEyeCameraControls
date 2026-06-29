@@ -75,6 +75,7 @@
     "rotate speed (1 = stock): ": "швидкість обертання (1 = базова): ",
     "near clip": "ближня площина відсікання",
     "far clip": "дальня площина відсікання",
-    "solid walls  – stop walls/doors dissolving in front of the camera in this view": "суцільні стіни  – не дають стінам/дверям розчинятися перед камерою в цьому виді"
+    "solid walls  – stop walls/doors dissolving in front of the camera in this view": "суцільні стіни  – не дають стінам/дверям розчинятися перед камерою в цьому виді",
+    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "вільне наведення курсора (геймпад)  – у режимі курсора лівий стік переміщує вказівник по екрану, а не панорамує камеру"
   }
 }
