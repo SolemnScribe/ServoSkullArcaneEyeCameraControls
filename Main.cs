@@ -28,12 +28,16 @@ namespace ServoSkullCameraControls
         public float FarClip = 2000f;        // per-view far clip plane when FarClipEnabled (provisional range - calibrate to the game baseline)
         public bool  FarClipEnabled = false; // cull geometry beyond FarClip on this view (off by default; can interact with fog/skybox)
         public bool Mouselook = false; // drive yaw/pitch with the mouse while this view is active
+        public bool LockPitch = false; // hold this view's Pitch every frame (cutscene/transition-proof); ignored while Mouselook is on, and on View 1 on a pad
         public float RotateSpeedMult = 1.0f; // per-view keyboard-rotation speed multiplier (1 = unchanged)
         public float PivotHeight = 2.0f;     // per-view world-up pivot height (~shoulder/head); raises the orbit
         public float Shoulder = 0f;          // per-view lateral over-the-shoulder offset along Right (+/- picks the side)
         public float Dolly = 0f;             // per-view dolly-in distance toward the focal at fixed FOV (0 = native ~27u distance)
         public bool LiveFollow = false;      // anchor to the subject's live (smooth, interpolated) ViewTransform instead of the discrete logic-tracking focal; locks the model in frame at close range
         public bool SolidWalls = false;      // suppress RT's occluder see-through on this view, so walls and doors in front of the camera stay solid instead of dissolving
+        public float DialogHeight = 1.3f;    // Full-tactical dialogue: world-up framing height for this view (was the global DialogVerticalOffset)
+        public bool  DialogZoomEnabled = false; // pin a fixed zoom in Full-tactical dialogue for this view (off = the view's own zoom carries through)
+        public float DialogZoom = 0.4f;       // the pinned dialogue zoom (scroll position 0..1) when DialogZoomEnabled
     }
 
     public class Settings : UnityModManager.ModSettings
@@ -42,7 +46,8 @@ namespace ServoSkullCameraControls
         public bool FramingEnabled = true;
         public bool FramingPauseInCutscenes = false;
         public DialogFramingMode DialogFraming = DialogFramingMode.Tactical;   // behaviour during RT Dialog mode (see enum)
-        public float DialogVerticalOffset = 1.3f;   // Full-tactical dialogue: world-up framing height (replaces the gameplay pivot in dialogue)
+        public float DialogVerticalOffset = 1.3f;   // LEGACY: the old single global dialogue height; kept only so it still deserializes for the one-time migration into each view's DialogHeight. No longer shown or used at runtime.
+        public bool  DialogFramingMigrated = false;  // set once DialogVerticalOffset has been copied into the per-view DialogHeight fields
 
         // --- Pitch range (widens the band the native Mouse3 drag is clamped to) ---
         public bool PitchRangeEnabled = true;
@@ -74,6 +79,11 @@ namespace ServoSkullCameraControls
 
         // Apply View 1 once when a save is loaded (initial game load), not on area-to-area transitions.
         public bool ApplyView1OnLoad = true;
+
+        // Gamepad only, on-foot: engage the game's "Character control" (the left stick moves your character
+        // directly) once when a save loads, instead of stock cursor mode. The player can still click the left
+        // stick (L3) to toggle it back to the cursor. Mirrors a single L3 press at load.
+        public bool DirectControlOnGamepadLoad = true;
 
         // --- Mouselook (per-view; a flagged view drives yaw/pitch with the mouse) ---
         public float MouselookSensitivity = 2.5f;   // X (yaw) sensitivity
@@ -243,12 +253,15 @@ namespace ServoSkullCameraControls
         // undisturbed on the subject, so it normally releases in a fraction of a second rather than running full
         // length. Area-to-area transitions never set _loadPending, so they are left alone.
         const int ApplyView1DelayFrames = 4;
+        const int DirectControlDelayFrames = 6;   // gamepad on-load direct-control flip: wait past the area load for the gameplay input layer (SurfaceMainInputLayer.Instance) to come up
         const int PostDialogReapplyFrames = 10;   // wait this many frames after a scripted-shot conversation ends, for the exit blend to settle, before re-stamping the active view (tunable)
         const float RecenterMaxSeconds = 0.8f;     // hard cap on the on-load recenter window
         const float RecenterMinSeconds = 0.2f;     // keep correcting at least this long (covers the establishing-shot set and unit positioning)
         const float RecenterSettleSeconds = 0.2f;  // ...then stop once the focal has sat on the subject this long undisturbed
         static bool _loadPending;
         static int _applyView1Countdown;
+        static int _directControlCountdown;   // frames until the gamepad on-load direct-control flip is attempted
+        static int _directControlRetries;     // remaining per-frame retries if the input layer isn't up yet at the flip tick
         static int _postDialogReapply;
         static bool _recenterActive;
         static float _recenterElapsed, _recenterSettled;
@@ -261,6 +274,13 @@ namespace ServoSkullCameraControls
             {
                 _applyView1Countdown = ApplyView1DelayFrames;
                 _recenterActive = true; _recenterElapsed = 0f; _recenterSettled = 0f;
+            }
+            // Independent of the camera-view apply: arm the gamepad on-load direct-control flip. The gamepad
+            // check happens when it fires (not here), so a pad in use at load is covered regardless of View 1.
+            if (settings != null && settings.DirectControlOnGamepadLoad)
+            {
+                _directControlCountdown = DirectControlDelayFrames;
+                _directControlRetries = 20;
             }
         }
 
@@ -316,6 +336,9 @@ namespace ServoSkullCameraControls
         // capture patch; the frame stamp lets a centred stick (which fires no Rewired event) read as zero.
         internal static float GpRightStickY;
         internal static int GpRightStickFrame = -100;
+        // WotR's input layer has no static Instance; its per-frame OnUpdate patch caches the live layer here
+        // so the on-load direct-control flip can reach it. Unused on RT (which resolves Instance statically).
+        internal static object CachedInputLayer;
         static float _gpPitch;
         static bool _gpPitchActive;
         public const float GamepadPitchRate = 90f;   // deg/sec at full stick, before the Y-sensitivity multiplier
@@ -333,7 +356,15 @@ namespace ServoSkullCameraControls
             ModEntry = modEntry;
             Log = modEntry.Logger;
             settings = UnityModManager.ModSettings.Load<Settings>(modEntry);
+            if (!settings.DialogFramingMigrated)   // one-time: the dialogue framing height moved from a single global to per-view
+            {
+                settings.View1.DialogHeight = settings.DialogVerticalOffset;
+                settings.View2.DialogHeight = settings.DialogVerticalOffset;
+                settings.DialogFramingMigrated = true;
+                settings.Save(modEntry);
+            }
             Localization.Init(modEntry);   // pick the language file matching the game's current locale
+            Compat.Init();                 // detect RT vs WotR reflection targets (logs the UI flavour)
 
             HarmonyInst = new Harmony(modEntry.Info.Id);
             HarmonyInst.PatchAll(Assembly.GetExecutingAssembly());
@@ -391,6 +422,24 @@ namespace ServoSkullCameraControls
                     ApplyView(settings.View1);
                     _activeView = 1;
                     Log?.Log("Applied View 1 on game load.");
+                }
+            }
+
+            // Gamepad on-load "Character control": once the area has settled, if we're on a pad, switch the
+            // on-foot input layer out of cursor mode into direct character movement - the same flip L3 does.
+            // One-shot (never re-asserted), so the player keeps full L3 control afterward. If the input layer
+            // isn't up yet at the flip tick, retry for a few frames rather than miss the window.
+            if (_directControlCountdown > 0)
+            {
+                _directControlCountdown--;
+                if (_directControlCountdown == 0 && settings.DirectControlOnGamepadLoad)
+                {
+                    if (CameraRig_UpdateInternal_Patch.InGamepadMode())
+                    {
+                        if (!TryEngageDirectControlOnFoot() && _directControlRetries-- > 0)
+                            _directControlCountdown = 1;   // input layer not ready; try again next frame
+                    }
+                    // Not on a pad: leave the cursor alone (mouse/keyboard players don't want this), no retry.
                 }
             }
 
@@ -494,6 +543,7 @@ namespace ServoSkullCameraControls
             if (FreeCursorHeld() || UmmWindowOpen()) return false;
             if (!UIGate.PlainSurface()) return false;
             if (CameraRig_UpdateInternal_Patch.InCutscene()) return false;
+            if (CameraRig_UpdateInternal_Patch.InDialogMode()) return false;    // WotR routes dialogue through GameModeType.Dialog; yield the cursor for it (harmless on RT, which yields via the cutscene path)
             if (CameraRig_UpdateInternal_Patch.InGamepadMode()) return false;   // stick can't drive mouse axes; let the game's native look run
             return true;
         }
@@ -609,7 +659,7 @@ namespace ServoSkullCameraControls
             catch (Exception e) { Log?.Error("Applying view failed: " + e); }
         }
 
-        static void SetFloat(Traverse owner, string field, float val)
+        internal static void SetFloat(Traverse owner, string field, float val)
         {
             var f = owner.Field(field);
             if (f.FieldExists()) f.SetValue(val);
@@ -771,6 +821,77 @@ namespace ServoSkullCameraControls
             catch (Exception e) { Log?.Error("Gamepad pitch-hold failed: " + e); }
         }
 
+        // ---- Gamepad on-load direct character control (the L3 "Character control" toggle) -----------------
+        // The gameplay input layer carries a CursorEnabled flag (on Owlcat's GamepadInput.InputLayer base):
+        // true = the left stick drives the cursor (stock), false = it drives the selected character directly.
+        // SurfaceMainInputLayer.SwitchCursorEnabled() is the L3 handler that flips it. We read the current
+        // state and only flip when it's still in cursor mode, so we can never turn an already-direct mode off.
+        static bool _dcInit;
+        static Type _dcLayerType;
+        static PropertyInfo _dcInstanceProp;
+        static MethodInfo _dcSwitch;
+
+        static void InitDirectControlReflection()
+        {
+            if (_dcInit) return;
+            _dcInit = true;
+            _dcLayerType = AccessTools.TypeByName("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer")
+                        ?? AccessTools.TypeByName("Kingmaker.UI._ConsoleUI.InputLayers.InGameLayer.InGameInputLayer");
+            if (_dcLayerType != null)
+            {
+                _dcInstanceProp = AccessTools.Property(_dcLayerType, "Instance");   // RT static singleton; null on WotR (use CachedInputLayer)
+                _dcSwitch = AccessTools.Method(_dcLayerType, "SwitchCursorEnabled");
+            }
+        }
+
+        // Reads the layer's CursorEnabled (property, else backing field m_CursorEnabled on the base). Returns
+        // false if neither could be resolved, so the caller leaves the control mode untouched.
+        static bool TryReadCursorEnabled(object layer, out bool cursorEnabled)
+        {
+            cursorEnabled = false;
+            var tp = Traverse.Create(layer).Property("CursorEnabled");
+            if (tp.PropertyExists()) { cursorEnabled = tp.GetValue<bool>(); return true; }
+            var tf = Traverse.Create(layer).Field("m_CursorEnabled");
+            if (tf.FieldExists()) { cursorEnabled = tf.GetValue<bool>(); return true; }
+            return false;
+        }
+
+        // Returns true once it has resolved the input layer and acted (or confirmed it was already direct);
+        // returns false only when the layer isn't available yet, so the caller can retry next frame.
+        static bool TryEngageDirectControlOnFoot()
+        {
+            try
+            {
+                InitDirectControlReflection();
+                if (_dcLayerType == null || _dcSwitch == null)
+                {
+                    Log?.Log("Gamepad direct-control: input-layer API not found; skipping.");
+                    return true;   // can't resolve the API; don't spin retries
+                }
+                // RT exposes a static Instance; WotR has none, so fall back to the layer cached from OnUpdate.
+                var layer = _dcInstanceProp != null ? _dcInstanceProp.GetValue(null) : CachedInputLayer;
+                if (layer == null) return false;   // on-foot input layer not up yet; allow a retry
+
+                bool cursorEnabled;
+                if (!TryReadCursorEnabled(layer, out cursorEnabled))
+                {
+                    Log?.Log("Gamepad direct-control: couldn't read CursorEnabled; leaving control mode untouched.");
+                    return true;
+                }
+                if (cursorEnabled)
+                {
+                    _dcSwitch.Invoke(layer, null);   // the game's own L3 flip -> direct character control
+                    Log?.Log("Gamepad: engaged direct character control on load (was cursor mode).");
+                }
+                else
+                {
+                    Log?.Log("Gamepad: already in direct character control at load; left as-is.");
+                }
+                return true;
+            }
+            catch (Exception e) { Log?.Error("Gamepad direct-control on load failed: " + e); return true; }
+        }
+
         // The toggle key steps through the targets the player ticked, in the fixed order
         // View 1 -> View 2 -> Vanilla, wrapping around. A preset only takes part when it's actually saved;
         // Vanilla (0) always takes part when ticked. If the current state isn't in the ring (e.g. its box was
@@ -852,6 +973,7 @@ namespace ServoSkullCameraControls
             GUILayout.EndHorizontal();
             GUILayout.Label("     " + L("\u2013 the toggle key steps through the ticked targets in order; Vanilla is the game's own camera."));
             settings.GamepadInvertPitch = GUILayout.Toggle(settings.GamepadInvertPitch, "     " + L("Invert gamepad pitch  \u2013 flip the right-stick up/down look direction (View 1 on a pad)"));
+            settings.DirectControlOnGamepadLoad = GUILayout.Toggle(settings.DirectControlOnGamepadLoad, "     " + L("Direct character control on gamepad load  \u2013 the left stick moves your character (click the stick to toggle)"));
             settings.ApplyView1OnLoad = GUILayout.Toggle(settings.ApplyView1OnLoad, "  " + L("Apply View 1 on game load (area-to-area transitions keep the current camera)"));
 
             GUILayout.Space(10f);
@@ -872,12 +994,7 @@ namespace ServoSkullCameraControls
             GUILayout.Label("     " + L("In dialogue:"), GUILayout.Width(150f));
             settings.DialogFraming = (DialogFramingMode)GUILayout.Toolbar((int)settings.DialogFraming, new[] { L("Off"), L("Lift only"), L("Full tactical") }, GUILayout.Width(360f));
             GUILayout.EndHorizontal();
-            GUILayout.Label("     " + L("dialogue framing \u2013 Off hands off to the game; Lift only keeps a gentle raise with no zoom; Full tactical keeps the over-the-shoulder zoom and holds your gameplay height while the game still frames the speakers left/right."));
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("     " + L("Dialogue height: ") + settings.DialogVerticalOffset.ToString("0.0"), GUILayout.Width(150f));
-            settings.DialogVerticalOffset = Snap(GUILayout.HorizontalSlider(settings.DialogVerticalOffset, DialogHeightMin, DialogHeightMax, GUILayout.Width(260f)), PivotStep);
-            GUILayout.EndHorizontal();
-            GUILayout.Label("     " + L("vertical framing height for Full tactical dialogue \u2013 raise or lower so the speaker sits where you want. You can drag this with a conversation open to tune it live."));
+            GUILayout.Label("     " + L("dialogue framing \u2013 Off hands off to the game; Lift only keeps a gentle raise with no zoom; Full tactical holds an over-the-shoulder framing while the game still frames the speakers left/right. Set the Full-tactical height (and an optional fixed zoom) per view in each view's block above."));
 
             GUILayout.Space(14f);
 
@@ -973,6 +1090,19 @@ namespace ServoSkullCameraControls
             v.Zoom = Snap(GUILayout.HorizontalSlider(v.Zoom, ViewZoomMin, ViewZoomMax, GUILayout.Width(235f)), ViewZoomStep);
             GUILayout.EndHorizontal();
 
+            // Pitch (the rig's target tilt) as a slider, plus a lock that re-asserts it every frame so a cutscene
+            // or transition can't leave the camera flattened. The lock is greyed on a mouselook view (the mouse
+            // owns pitch there); we don't write the stored flag back while it's greyed, so toggling mouselook
+            // doesn't wipe the preference.
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     " + L("pitch: ") + v.Pitch.ToString("0") + "\u00b0", GUILayout.Width(185f));
+            v.Pitch = Snap(GUILayout.HorizontalSlider(v.Pitch, MouselookPitchMin, PitchHardMax, GUILayout.Width(235f)), PitchStep);
+            GUILayout.EndHorizontal();
+            GUI.enabled = !v.Mouselook;
+            bool lockNow = GUILayout.Toggle(v.LockPitch, "     " + L("lock pitch  \u2013 hold this tilt through cutscenes and transitions (mouselook overrides it)"));
+            if (!v.Mouselook) v.LockPitch = lockNow;
+            GUI.enabled = true;
+
             // Focus offset (pivot / shoulder / dolly) - requires the global Focus offset toggle below.
             GUILayout.Label("     " + L("focus offset \u2013 needs \"Focus offset\" enabled below:"));
             GUILayout.BeginHorizontal();
@@ -987,7 +1117,24 @@ namespace ServoSkullCameraControls
             GUILayout.Label("       " + L("dolly-in: ") + v.Dolly.ToString("0.0"), GUILayout.Width(185f));
             v.Dolly = Snap(GUILayout.HorizontalSlider(v.Dolly, DollyMin, DollyMax, GUILayout.Width(235f)), DollyStep);
             GUILayout.EndHorizontal();
-            v.LiveFollow = GUILayout.Toggle(v.LiveFollow, "     " + L("live follow  \u2013 lock the model in frame at close range (best on the dollied-in view - but can add movement stutter)"));
+            // Live follow is inert in WotR (the rig exposes no Position/ViewTransform), so hide the control there.
+            if (Compat.Ui != Compat.UiKind.WotR)
+                v.LiveFollow = GUILayout.Toggle(v.LiveFollow, "     " + L("live follow  \u2013 lock the model in frame at close range (best on the dollied-in view - but can add movement stutter)"));
+
+            // Full-tactical dialogue framing for this view: the height that replaces the gameplay pivot during a
+            // conversation, and an optional fixed zoom (off = the view's own zoom carries through). Active only when
+            // the global dialogue mode above is set to Full tactical.
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("       " + L("dialogue height: ") + v.DialogHeight.ToString("0.0"), GUILayout.Width(185f));
+            v.DialogHeight = Snap(GUILayout.HorizontalSlider(v.DialogHeight, DialogHeightMin, DialogHeightMax, GUILayout.Width(235f)), PivotStep);
+            GUILayout.EndHorizontal();
+            v.DialogZoomEnabled = GUILayout.Toggle(v.DialogZoomEnabled, "       " + L("fixed dialogue zoom"));
+            GUI.enabled = v.DialogZoomEnabled;
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("       " + L("dialogue zoom: ") + (v.DialogZoom * 100f).ToString("0") + "%", GUILayout.Width(185f));
+            v.DialogZoom = Snap(GUILayout.HorizontalSlider(v.DialogZoom, ViewZoomMin, ViewZoomMax, GUILayout.Width(235f)), ViewZoomStep);
+            GUILayout.EndHorizontal();
+            GUI.enabled = true;
 
             // Keyboard rotation speed for this view.
             GUILayout.BeginHorizontal();
@@ -1096,6 +1243,37 @@ namespace ServoSkullCameraControls
             return null;
         }
 
+        // Active view's pitch when a hold should be enforced this frame, else NaN. NaN when there's no active
+        // view, the view isn't set, lock-pitch is off, the view uses mouselook (the mouse owns pitch), or it's
+        // View 1 on a pad (the right-stick pitch-hold owns it). The caller stands it down during scripted shots.
+        internal static float ActiveViewLockedPitch()
+        {
+            if (settings == null) return float.NaN;
+            CameraView v = _activeView == 1 ? settings.View1 : (_activeView == 2 ? settings.View2 : null);
+            if (v == null || !v.IsSet || !v.LockPitch || v.Mouselook) return float.NaN;
+            if (_activeView == 1 && CameraRig_UpdateInternal_Patch.InGamepadMode()) return float.NaN;
+            return Mathf.Clamp(v.Pitch, MouselookPitchMin, PitchHardMax);
+        }
+
+        // Active view's Full-tactical dialogue height (the old global default if no preset is active - it won't be
+        // used in that case, since the focus offset stands down without an active view).
+        internal static float ActiveViewDialogHeight()
+        {
+            if (settings == null) return 1.3f;
+            if (_activeView == 1) return settings.View1.DialogHeight;
+            if (_activeView == 2) return settings.View2.DialogHeight;
+            return 1.3f;
+        }
+
+        // Active view's pinned dialogue zoom, or NaN when there's no active view or its fixed-zoom toggle is off.
+        internal static float ActiveViewDialogZoom()
+        {
+            if (settings == null) return float.NaN;
+            CameraView v = _activeView == 1 ? settings.View1 : (_activeView == 2 ? settings.View2 : null);
+            if (v == null || !v.DialogZoomEnabled) return float.NaN;
+            return Mathf.Clamp(v.DialogZoom, ViewZoomMin, ViewZoomMax);
+        }
+
         // --- Solid walls (per view): while a view with SolidWalls set is active we hold RT's occluder
         // see-through clip off, so walls and doors in front of the camera stay solid instead of dissolving.
         // We re-assert the off state every frame (an area load restarts the clip service, which would
@@ -1137,15 +1315,34 @@ namespace ServoSkullCameraControls
 
         static object GetZoom(object rig) => Traverse.Create(rig).Property("CameraZoom").GetValue<object>();
 
+        // CameraZoom exposes the zoom endpoints as properties on RT but as plain fields on WotR, so resolve
+        // either. Returns NaN when the member is absent (e.g. WotR has no PhysicalZoom*), so Apply skips it.
+        static float GetMember(Traverse tz, string name)
+        {
+            var p = tz.Property(name);
+            if (p.PropertyExists()) return p.GetValue<float>();
+            var f = tz.Field(name);
+            if (f.FieldExists()) return f.GetValue<float>();
+            return float.NaN;
+        }
+
+        static void SetMember(Traverse tz, string name, float v)
+        {
+            var p = tz.Property(name);
+            if (p.PropertyExists()) { p.SetValue(v); return; }
+            var f = tz.Field(name);
+            if (f.FieldExists()) f.SetValue(v);
+        }
+
         public static void CaptureBaseline(object rig)
         {
             var zoom = GetZoom(rig);
             if (zoom == null) return;
             var tz = Traverse.Create(zoom);
-            _fovMin = tz.Property("FovMin").GetValue<float>();
-            _fovMax = tz.Property("FovMax").GetValue<float>();
-            _physMin = tz.Property("PhysicalZoomMin").GetValue<float>();
-            _physMax = tz.Property("PhysicalZoomMax").GetValue<float>();
+            _fovMin = GetMember(tz, "FovMin");
+            _fovMax = GetMember(tz, "FovMax");
+            _physMin = GetMember(tz, "PhysicalZoomMin");   // RT only; NaN on WotR, whose zoom is FOV-only
+            _physMax = GetMember(tz, "PhysicalZoomMax");
             _captured = true;
         }
 
@@ -1160,12 +1357,12 @@ namespace ServoSkullCameraControls
             float inF  = restoreDefault ? 1f : Mathf.Clamp(Main.settings.ZoomInFactor,  Main.ZoomInMin,  Main.ZoomInMax);
 
             // FOV mode: wider FOV = more zoomed out, narrower = more zoomed in.
-            tz.Property("FovMax").SetValue(Mathf.Clamp(_fovMax * outF, 5f, 110f));
-            tz.Property("FovMin").SetValue(Mathf.Clamp(_fovMin / inF, 2f, 110f));   // floor lowered from 5 so high zoom-in factors can bite
+            if (!float.IsNaN(_fovMax)) SetMember(tz, "FovMax", Mathf.Clamp(_fovMax * outF, 5f, 110f));
+            if (!float.IsNaN(_fovMin)) SetMember(tz, "FovMin", Mathf.Clamp(_fovMin / inF, 2f, 110f));   // floor lowered from 5 so high zoom-in factors can bite
 
-            // Physical mode (best-effort; flip if a slider feels inverted in-game).
-            tz.Property("PhysicalZoomMin").SetValue(_physMin * outF);
-            tz.Property("PhysicalZoomMax").SetValue(_physMax / inF);
+            // Physical mode (RT only; absent on WotR, so skipped). Best-effort; flip if a slider feels inverted in-game.
+            if (!float.IsNaN(_physMin)) SetMember(tz, "PhysicalZoomMin", _physMin * outF);
+            if (!float.IsNaN(_physMax)) SetMember(tz, "PhysicalZoomMax", _physMax / inF);
         }
     }
 
@@ -1306,6 +1503,33 @@ namespace ServoSkullCameraControls
             if (_setEnabled == null) return;
             try { _setEnabled.Invoke(null, new object[] { on }); }
             catch (Exception e) { Main.Log?.Error("OccluderClip.SetGameClipEnabled failed: " + e); }
+        }
+    }
+
+    // ===== FIX: project overtips through the LIVE render camera. =====
+    // The mod's focus offset -- a world-up pivot, a lateral shoulder shift, and a large (~25u on View 1)
+    // dolly -- is applied to the rig in CameraRig.UpdateInternal's POSTFIX, AFTER the game has built
+    // m_WorldToClipMatrixCached, the matrix the overtips read. So the overtips were projected from the
+    // un-shifted camera (~27u out) while the units render from the shifted, dollied-in camera (~2u out):
+    // a large FIXED parallax error, present even when the camera is still, whose screen direction flips
+    // with yaw (a fixed camera displacement projects differently as the view turns) -- not rotation lag.
+    // The live camera's own projection includes the offset and so lands where the units actually render,
+    // so we project the overtips through it instead of the stale cached matrix. This also corrects the
+    // other rig.WorldToViewport consumers (selection box, rulers, scanner), which the offset displaced
+    // the same way. Behind-camera points are pushed off-screen so the game hides them.
+    [HarmonyPatch]
+    static class CameraRig_WorldToViewport_LiveProjectionPatch
+    {
+        static bool Prepare() => AccessTools.Method("Kingmaker.View.CameraRig:WorldToViewport", new[] { typeof(Vector3) }) != null;
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.View.CameraRig:WorldToViewport", new[] { typeof(Vector3) });
+
+        static void Postfix(object __instance, Vector3 __0, ref Vector2 __result)
+        {
+            Camera cam = null;
+            try { cam = Traverse.Create(__instance).Property("Camera").GetValue<Camera>(); } catch { }
+            if (cam == null) return;
+            Vector3 vp = cam.WorldToViewportPoint(__0);                                // live render projection (includes the offset)
+            __result = (vp.z > 0f) ? new Vector2(vp.x, vp.y) : new Vector2(-1f, -1f);  // behind camera -> off-screen (hidden)
         }
     }
 
@@ -1530,7 +1754,7 @@ namespace ServoSkullCameraControls
                 var s = Main.settings;
                 var t = Traverse.Create(__instance);
 
-                bool hardBind = t.Field("m_HardBindPositionEnabled").GetValue<bool>();
+                bool hardBind = ReadHardBind(t);
 
                 // Overworld/system/sector map shares this rig but wants the game's native camera - treat it
                 // like a hard-bound shot so framing, clip and the occluder toggle all stand down.
@@ -1546,18 +1770,48 @@ namespace ServoSkullCameraControls
                 if (Main.ActiveViewNum == 0 && !hardBind && !InCutscene())
                     Main.CaptureVanillaState(__instance);
 
-                // Zoom: maintained every frame; reverted when off, hard-bound, or paused.
-                bool zoomRevert = !s.ZoomLimitsEnabled || hardBind || (s.ZoomPauseInCutscenes && inCut);
+                // Zoom: maintained every frame; reverted when off, hard-bound, during an in-dialogue scripted
+                // shot (CameraCutsceneActive is dialogue-only, so this doesn't touch pure cutscenes), and in pure
+                // cutscenes only when the pause-in-cutscenes toggle is on - that control stays authoritative there.
+                bool zoomRevert = !s.ZoomLimitsEnabled || hardBind
+                                || CutsceneCameraGate.CameraCutsceneActive()
+                                || (s.ZoomPauseInCutscenes && inCut);
                 ZoomLimits.Apply(__instance, restoreDefault: zoomRevert);
 
-                // Pitch range: widen the native drag clamp (only affects manual drag).
-                if (s.PitchRangeEnabled && !hardBind)
+                // Pitch range: widen the native drag clamp (only affects manual drag). Stand it down under any
+                // scripted camera control too - the clamp otherwise forces an authored low-angle shot back up.
+                if (s.PitchRangeEnabled && !hardBind && !InCutscene() && !CutsceneCameraGate.CameraCutsceneActive())
                     PitchRange.Apply(__instance, s.MinPitchAngle, s.MaxPitchAngle);
 
-                // Clip planes: per active view, near and far independently. Restore baseline when neither is on.
+                // Lock pitch: hold the active view's tilt every frame so a cutscene/transition can't leave the
+                // camera flattened. Stood down while any scripted shot owns the camera (hard-bind, cutscene mode,
+                // or an in-dialogue camera command) and re-asserted the instant it hands back. Mouselook views and
+                // View 1 on a pad are excluded inside the helper.
+                float lockPitch = Main.ActiveViewLockedPitch();
+                if (!float.IsNaN(lockPitch) && !hardBind && !InCutscene() && !CutsceneCameraGate.CameraCutsceneActive())
+                {
+                    var lockTr = t.Field("m_TargetRotate");
+                    Vector3 lr = lockTr.GetValue<Vector3>();
+                    if (Mathf.Abs(lr.x - lockPitch) > 0.001f || Mathf.Abs(lr.z) > 0.001f)
+                    {
+                        lr.x = lockPitch; lr.z = 0f;
+                        lockTr.SetValue(lr);
+                        var lockComp = __instance as Component;
+                        if (lockComp != null)
+                        {
+                            float keepYaw = lockComp.transform.eulerAngles.y;   // preserve facing; pin only pitch
+                            lockComp.transform.rotation = Quaternion.Euler(lockPitch, keepYaw, 0f);
+                        }
+                    }
+                }
+
+                // Clip planes: per active view, near and far independently. Restore baseline when neither is on,
+                // and stand the override down under any scripted camera control so an authored shot keeps the
+                // game's own near/far (no user toggle for this, unlike zoom's pause-in-cutscenes).
                 CameraView ccv = Main.ActiveViewObj();
-                bool nearOn = !hardBind && ccv != null && ccv.NearClipEnabled;
-                bool farOn  = !hardBind && ccv != null && ccv.FarClipEnabled;
+                bool clipCutCam = hardBind || InCutscene() || CutsceneCameraGate.CameraCutsceneActive();
+                bool nearOn = !clipCutCam && ccv != null && ccv.NearClipEnabled;
+                bool farOn  = !clipCutCam && ccv != null && ccv.FarClipEnabled;
                 if (nearOn || farOn) ClipPlane.Apply(__instance, nearOn, ccv.NearClip, farOn, ccv.FarClip);
                 else ClipPlane.Restore(__instance);
 
@@ -1693,8 +1947,26 @@ namespace ServoSkullCameraControls
                 // pivot, because the dolly's downward pull in dialogue is pitch-dependent and no single constant
                 // suits every angle; the base-Y pin at the write still matches gameplay height underneath.
                 bool dialogTactical = inDialog && dmode == DialogFramingMode.Tactical;
-                float effPivot = dialogTactical ? s.DialogVerticalOffset : ph;
+                float effPivot = dialogTactical ? Main.ActiveViewDialogHeight() : ph;
                 float effShoulder = dialogTactical ? 0f : shoulder;
+
+                // Static dialogue zoom (opt-in per view): pin the scroll position in Full-tactical dialogue so the
+                // conversation keeps a consistent zoom rather than the game's. Stands down for scripted shots.
+                if (dialogTactical && !hardBind && !CutsceneCameraGate.CameraCutsceneActive())
+                {
+                    float dlgZoom = Main.ActiveViewDialogZoom();
+                    if (!float.IsNaN(dlgZoom))
+                    {
+                        var dz = t.Property("CameraZoom").GetValue<object>();
+                        if (dz != null)
+                        {
+                            var tdz = Traverse.Create(dz);
+                            Main.SetFloat(tdz, "m_PlayerScrollPosition", dlgZoom);
+                            Main.SetFloat(tdz, "m_ScrollPosition", dlgZoom);
+                            Main.SetFloat(tdz, "m_SmoothScrollPosition", dlgZoom);
+                        }
+                    }
+                }
 
                 // Live subject position (the model's ViewTransform) - read once per frame for the live-follow
                 // anchor. haveLive stays false (caller falls back to the damped focal) until the follower-capture
@@ -1821,6 +2093,19 @@ namespace ServoSkullCameraControls
             }
         }
 
+        // RT marks a scripted (hard-bound) shot with the rig field m_HardBindPositionEnabled. WotR has no
+        // such field; instead it sets ControllingDirectorCameraLink (non-null) for the duration of a Timeline
+        // director's camera command (set by DirectorCameraLink.Link, cleared by UnLink). Read whichever the
+        // running game exposes; either way "true" means a scripted shot owns the camera and the mod stands down.
+        static bool ReadHardBind(Traverse t)
+        {
+            var f = t.Field("m_HardBindPositionEnabled");
+            if (f.FieldExists()) return f.GetValue<bool>();
+            var p = t.Property("ControllingDirectorCameraLink");
+            if (p.PropertyExists()) return p.GetValue<object>() != null;
+            return false;
+        }
+
         internal static bool InCutscene()
         {
             try
@@ -1936,24 +2221,78 @@ namespace ServoSkullCameraControls
         }
     }
 
+    // Cross-game (RT vs WotR) reflection targets, resolved once at load. The RT name is tried
+    // first and the WotR name is the fallback, so one compiled binary serves both games (see
+    // WOTR_COMPAT.md). A target that resolves under neither game leaves its feature self-disabled.
+    internal static class Compat
+    {
+        internal enum UiKind { Unknown, RT, WotR }
+        internal static UiKind Ui = UiKind.Unknown;
+
+        // RootUIContext: RT "Kingmaker.Code.UI.MVVM.RootUIContext", WotR "Kingmaker.UI.MVVM.RootUIContext".
+        internal static Type RootUIContext;
+
+        static bool _inited;
+        internal static void Init()
+        {
+            if (_inited) return;
+            _inited = true;
+
+            RootUIContext = AccessTools.TypeByName("Kingmaker.Code.UI.MVVM.RootUIContext");
+            if (RootUIContext != null) Ui = UiKind.RT;
+            else
+            {
+                RootUIContext = AccessTools.TypeByName("Kingmaker.UI.MVVM.RootUIContext");
+                if (RootUIContext != null) Ui = UiKind.WotR;
+            }
+
+            Main.Log?.Log("Compat: UI flavour " + Ui
+                + (RootUIContext != null ? " (" + RootUIContext.FullName + ")" : " - RootUIContext not found"));
+        }
+    }
+
     // Reads RootUIContext to tell whether the player is in plain surface gameplay with no
     // full-screen window, dialogue, or UI grabbing the cursor - the only state mouselook locks in.
     static class UIGate
     {
         static bool _probed;
+        // RT (Code.UI.MVVM) gate members.
         static PropertyInfo _instance, _isSurface, _hasDialog, _fullScreenType;
+        // WotR (UI.MVVM) gate members - it has no IsSurface/HasDialog/FullScreenUIType, so the same
+        // "free, cursor-free exploration" intent is composed from the members it does expose.
+        static PropertyInfo _isInGame, _isTacticalCombat, _isGlobalMap, _isKingdom, _isCityBuilder,
+                            _isMainMenu, _currentServiceWindow, _saveLoadShown, _modalShown, _changeVisualShown;
 
         static void Probe()
         {
             if (_probed) return;
             _probed = true;
-            var t = AccessTools.TypeByName("Kingmaker.Code.UI.MVVM.RootUIContext");
+            Compat.Init();
+            var t = Compat.RootUIContext;
             if (t == null) return;
             _instance = AccessTools.Property(t, "Instance");
-            _isSurface = AccessTools.Property(t, "IsSurface");
-            _hasDialog = AccessTools.Property(t, "HasDialog");
-            _fullScreenType = AccessTools.Property(t, "FullScreenUIType");
+            if (Compat.Ui == Compat.UiKind.WotR)
+            {
+                _isInGame             = AccessTools.Property(t, "IsInGame");
+                _isTacticalCombat     = AccessTools.Property(t, "IsTacticalCombat");
+                _isGlobalMap          = AccessTools.Property(t, "IsGlobalMap");
+                _isKingdom            = AccessTools.Property(t, "IsKingdom");
+                _isCityBuilder        = AccessTools.Property(t, "IsCityBuilder");
+                _isMainMenu           = AccessTools.Property(t, "IsMainMenu");
+                _currentServiceWindow = AccessTools.Property(t, "CurrentServiceWindow");
+                _saveLoadShown        = AccessTools.Property(t, "SaveLoadIsShown");
+                _modalShown           = AccessTools.Property(t, "ModalMessageWindowShown");
+                _changeVisualShown    = AccessTools.Property(t, "ChangeVisualIsShown");
+            }
+            else
+            {
+                _isSurface      = AccessTools.Property(t, "IsSurface");
+                _hasDialog      = AccessTools.Property(t, "HasDialog");
+                _fullScreenType = AccessTools.Property(t, "FullScreenUIType");
+            }
         }
+
+        static bool IsTrue(PropertyInfo p, object ctx) => p != null && (bool)p.GetValue(ctx);
 
         public static bool PlainSurface()
         {
@@ -1963,6 +2302,24 @@ namespace ServoSkullCameraControls
                 if (_instance == null) return false;
                 var ctx = _instance.GetValue(null);
                 if (ctx == null) return false;
+
+                if (Compat.Ui == Compat.UiKind.WotR)
+                {
+                    // Plain surface = in gameplay, not on a map / in kingdom-or-city management /
+                    // tactical combat / the main menu, and no full-screen window or modal up.
+                    if (_isInGame != null && !(bool)_isInGame.GetValue(ctx)) return false;
+                    if (IsTrue(_isTacticalCombat, ctx) || IsTrue(_isGlobalMap, ctx) || IsTrue(_isKingdom, ctx)
+                        || IsTrue(_isCityBuilder, ctx) || IsTrue(_isMainMenu, ctx)) return false;
+                    if (_currentServiceWindow != null)
+                    {
+                        var w = _currentServiceWindow.GetValue(ctx);
+                        if (w != null && Convert.ToInt32(w) != 0) return false;   // 0 == ServiceWindowsType.None (none open)
+                    }
+                    if (IsTrue(_saveLoadShown, ctx) || IsTrue(_modalShown, ctx) || IsTrue(_changeVisualShown, ctx)) return false;
+                    return true;
+                }
+
+                // RT
                 if (_isSurface != null && !(bool)_isSurface.GetValue(ctx)) return false;
                 if (_hasDialog != null && (bool)_hasDialog.GetValue(ctx)) return false;
                 if (_fullScreenType != null)
@@ -2108,6 +2465,29 @@ namespace ServoSkullCameraControls
         }
     }
 
+    [HarmonyPatch]
+    static class PointMarker_Show_Patch   // WotR: the older non-MVVM off-screen party markers
+    {
+        // WotR drives the edge party-portrait pointers through Kingmaker.UI.PointMarker.PointMarker, whose
+        // controller calls Show() each frame a character is off-screen. Show() runs a DOTween fade-in, so we
+        // skip it entirely (Prefix returns false) and force the canvas hidden - that way nothing tweens it back.
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.UI.PointMarker.PointMarker:Show");
+        static bool Prepare() => TargetMethod() != null;
+        static bool Prefix(object __instance)
+        {
+            try
+            {
+                if (!OffscreenMarkerHide.ShouldHide()) return true;
+                var ch = Traverse.Create(__instance).Property("Character");
+                if (ch.PropertyExists() && ch.GetValue() == null) return true;   // not a character marker; leave it
+                var cg = Traverse.Create(__instance).Property("CanvasGroup").GetValue<CanvasGroup>();
+                if (cg != null) { cg.alpha = 0f; cg.blocksRaycasts = false; cg.interactable = false; }
+                return false;   // skip the fade-in so the edge pointer never appears
+            }
+            catch (Exception e) { Main.Log?.Error("Marker hide (WotR) failed: " + e); return true; }
+        }
+    }
+
     // View-1-on-load: hook the save-load entry points (NOT area transitions) and arm the deferred apply.
     // Patching all three covers main-menu load, in-game load, and quick-load; whichever fires sets the flag,
     // and it is consumed once on the next area-did-load, so re-entrancy between them is harmless.
@@ -2175,6 +2555,10 @@ namespace ServoSkullCameraControls
     // ------------------------------------------------------------------------------------------------
     // Camera-cutscene gate.
     //
+    // NOTE: the "mod borks cutscene camera moves" issue was diagnosed here - see CUTSCENE_DETECTION.md. It was
+    // NOT a detection gap: in-dialogue scripted shots ARE bracketed by this gate (CameraCutsceneActive). The
+    // borking was PitchRange, ClipPlane and ZoomLimits applying during the shot - they had been gated only on
+    // hardBind, now also stood down on InCutscene/CameraCutsceneActive. DontForceLookAtTarget was a red herring.
     // In-dialogue scripted shots (e.g. CamOnReceiver) are driven by CommandControlCamera; its OnRun marks the
     // start. They emit no usable end event - no OnStop/Interrupt/IsFinished on the command, and on the common
     // path no CutscenePlayerData.Stop/IsFinished either - the camera simply holds the last shot until the
@@ -2281,16 +2665,37 @@ namespace ServoSkullCameraControls
     [HarmonyPatch]
     static class SurfaceRightStick_Capture
     {
-        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer:OnMoveRightStick");
+        static MethodBase TargetMethod() =>
+            AccessTools.Method("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer:OnMoveRightStick")
+            ?? AccessTools.Method("Kingmaker.UI._ConsoleUI.InputLayers.InGameLayer.InGameInputLayer:OnMoveRightStick");
         static bool Prepare() => TargetMethod() != null;
         static void Postfix(object[] __args)
         {
-            if (__args != null && __args.Length >= 2 && __args[1] is Vector2 v)
+            if (__args == null) return;
+            // RT passes the decoded stick vector as arg 1; WotR's layer may order it differently, so fall
+            // back to the first Vector2 in the args. Either way we want its y for View 1's pitch-hold.
+            object a = (__args.Length >= 2 && __args[1] is Vector2) ? __args[1] : null;
+            if (a == null)
+                foreach (var x in __args) if (x is Vector2) { a = x; break; }
+            if (a is Vector2 v)
             {
                 Main.GpRightStickY = v.y;
                 Main.GpRightStickFrame = Time.frameCount;
             }
         }
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // Input-layer instance capture (WotR). WotR's InGameInputLayer has no static Instance, so cache the
+    // live layer from its per-frame OnUpdate for the on-load direct-control flip. RT resolves Instance
+    // statically, so this patch's WotR-only target is absent there and the class is simply skipped.
+    [HarmonyPatch]
+    static class InputLayerInstance_Capture
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method("Kingmaker.UI._ConsoleUI.InputLayers.InGameLayer.InGameInputLayer:OnUpdate");
+        static bool Prepare() => TargetMethod() != null;
+        static void Postfix(object __instance) => Main.CachedInputLayer = __instance;
     }
 
     // ------------------------------------------------------------------------------------------------
