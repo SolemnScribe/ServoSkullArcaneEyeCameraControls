@@ -20,6 +20,7 @@
     "Vanilla": "Vanilla",
     "– the toggle key steps through the ticked targets in order; Vanilla is the game's own camera.": "– the toggle key steps through the ticked targets in order; Vanilla is the game's own camera.",
     "Invert gamepad pitch  – flip the right-stick up/down look direction (View 1 on a pad)": "Invert gamepad pitch  – flip the right-stick up/down look direction (View 1 on a pad)",
+    "gamepad deadzone: ": "gamepad deadzone: ",
     "Direct character control on gamepad load  – the left stick moves your character (click the stick to toggle)": "Direct character control on gamepad load  – the left stick moves your character (click the stick to toggle)",
     "Apply View 1 on game load (area-to-area transitions keep the current camera)": "Apply View 1 on game load (area-to-area transitions keep the current camera)",
     "Focus offset  (enables each view's pivot + shoulder + dolly)": "Focus offset  (enables each view's pivot + shoulder + dolly)",

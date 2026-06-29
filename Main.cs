@@ -71,6 +71,7 @@ namespace ServoSkullCameraControls
         public int ToggleKey   = (int)KeyCode.CapsLock;
         public int GamepadToggleKey = (int)KeyCode.JoystickButton4;   // gamepad view-toggle; defaults to the Xbox Left Bumper (LB). The D-pad reports as an axis, not a button, so Unity's input can't bind it here; rebindable to any pad button in settings
         public bool GamepadInvertPitch = false;  // invert the right-stick pitch on a pad. Off = stick up looks up; on flips it. Needs its own flag, not MouselookInvertY: the stick vector's Y sign is already opposite Unity's Mouse Y, so the same factor reads the other way round on a pad
+        public float GamepadDeadzone = 0.12f;    // thumbstick centre deadzone (both axes); applied before pitch-hold and yaw amplification
 
         // Which targets the toggle key steps through, in the order View 1 -> View 2 -> Vanilla. A preset
         // is only included when it is also saved; Vanilla is the game's own camera (no preset). Defaults:
@@ -324,6 +325,8 @@ namespace ServoSkullCameraControls
         public const float PivotScrollStep = 2.5f;   // Ctrl+scroll pivot-height change per notch
         public const float DollyScrollStep = 2.0f;   // Ctrl+Shift+scroll dolly change per notch
         public const float DialogHeightMin = 0f, DialogHeightMax = 4f;   // Full-tactical dialogue framing-height slider range (world-up raise)
+        public const float DeadzoneMin = 0f, DeadzoneMax = 0.5f, DeadzoneStep = 0.01f;
+
 
         static int _bindingTarget;   // 0 none; 1 set-view-1; 2 set-view-2; 3 toggle
         static int _activeView;      // 0 none/vanilla; 1; 2  (toggle state)
@@ -852,7 +855,8 @@ namespace ServoSkullCameraControls
         {
             if (Time.frameCount - GpRightStickFrame > 1) return 0f;
             float y = GpRightStickY;
-            return Mathf.Abs(y) < 0.12f ? 0f : y;
+            float dz = settings?.GamepadDeadzone ?? 0.12f;
+            return Mathf.Abs(y) < dz ? 0f : y;
         }
 
         // Current right-stick X for yaw, or zero when centred. Same staleness/deadzone as the pitch input.
@@ -860,7 +864,8 @@ namespace ServoSkullCameraControls
         {
             if (Time.frameCount - GpRightStickFrame > 1) return 0f;
             float x = GpRightStickX;
-            return Mathf.Abs(x) < 0.12f ? 0f : x;
+            float dz = settings?.GamepadDeadzone ?? 0.12f;
+            return Mathf.Abs(x) < dz ? 0f : x;
         }
 
         // The pitch-hold runs only for View 1 on a pad with a set view.
@@ -929,11 +934,51 @@ namespace ServoSkullCameraControls
             catch (Exception e) { Log?.Error("Gamepad pitch-hold failed: " + e); }
         }
 
+        static bool _rightStickDeadzoneRemoved;
+
+        // Zero Rewired's calibration deadzone on the right-stick physical axes (2 = RX, 3 = RY) so raw evdev
+        // values from rest to full deflection all reach the OnMoveRightStick callback, not just the segment
+        // past ~0.13. Called once from the first TickGamepadYawMult frame. Rewired's AxisCalibration.deadZone
+        // clamps sub-deadzone raw input before the sensitivity curve; zeroing it gives us a linear 0-1 response
+        // with no hidden floor.
+        internal static void RemoveRightStickDeadzone()
+        {
+            if (_rightStickDeadzoneRemoved) return;
+            try
+            {
+                var reInputType = AccessTools.TypeByName("Rewired.ReInput");
+                if (reInputType == null) return;
+                var controllers = reInputType.GetProperty("controllers", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                if (controllers == null) return;
+                var joysticks = controllers.GetType().GetProperty("Joysticks")?.GetValue(controllers) as System.Collections.IList;
+                if (joysticks == null || joysticks.Count == 0) return;
+                foreach (var j in joysticks)
+                {
+                    var calMap = j.GetType().GetProperty("calibrationMap")?.GetValue(j);
+                    if (calMap == null) continue;
+                    var getAxis = calMap.GetType().GetMethod("GetAxisCalibrations");
+                    var axes = getAxis?.Invoke(calMap, null) as System.Collections.IList;
+                    if (axes == null) continue;
+                    foreach (var axis in axes)
+                    {
+                        var tAxis = Traverse.Create(axis);
+                        int idx = tAxis.Field("index").GetValue<int>();
+                        if (idx == 2 || idx == 3)
+                            tAxis.Field("deadZone").SetValue(0f);
+                    }
+                }
+            }
+            catch { }
+            _rightStickDeadzoneRemoved = true;
+        }
+
         // Gamepad yaw-speed multiplier (reuses every view's existing RotateSpeedMult). Reads the stick X directly
         // and adds extra rotation to the camera transform, so it doesn't fight the follower's target. Stands down
         // during the same gates as the pitch hold.
         internal static void TickGamepadYawMult()
         {
+            if (CameraRig_UpdateInternal_Patch.InGamepadMode())
+                RemoveRightStickDeadzone();   // one-shot: strip Rewired's calibration deadzone off the right stick
             if (!CameraRig_UpdateInternal_Patch.InGamepadMode()
                 || _activeView == 0
                 || CameraRig_UpdateInternal_Patch.InCutscene()
@@ -1173,6 +1218,10 @@ namespace ServoSkullCameraControls
             GUILayout.EndHorizontal();
             GUILayout.Label("     " + L("\u2013 the toggle key steps through the ticked targets in order; Vanilla is the game's own camera."));
             settings.GamepadInvertPitch = GUILayout.Toggle(settings.GamepadInvertPitch, "     " + L("Invert gamepad pitch  \u2013 flip the right-stick up/down look direction (View 1 on a pad)"));
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     " + L("gamepad deadzone: ") + settings.GamepadDeadzone.ToString("0.00"), GUILayout.Width(250f));
+            settings.GamepadDeadzone = Snap(GUILayout.HorizontalSlider(settings.GamepadDeadzone, DeadzoneMin, DeadzoneMax, GUILayout.Width(235f)), DeadzoneStep);
+            GUILayout.EndHorizontal();
             settings.DirectControlOnGamepadLoad = GUILayout.Toggle(settings.DirectControlOnGamepadLoad, "     " + L("Direct character control on gamepad load  \u2013 the left stick moves your character (click the stick to toggle)"));
             settings.ApplyView1OnLoad = GUILayout.Toggle(settings.ApplyView1OnLoad, "  " + L("Apply View 1 on game load (area-to-area transitions keep the current camera)"));
 
