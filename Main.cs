@@ -314,7 +314,7 @@ namespace ServoSkullCameraControls
         public const float NearClipMin = 0.1f, NearClipMax = 18f, NearClipStep = 0.1f;
         public const float FarClipMin = 50f, FarClipMax = 4000f, FarClipStep = 25f;   // provisional - calibrate FarClipMax to the game's logged baseline far
         public const float MouseSensMin = 0.2f, MouseSensMax = 10f, MouseSensStep = 0.1f;
-        public const float RotMultMin = 0.1f, RotMultMax = 2f, RotMultStep = 0.05f;
+        public const float RotMultMin = 0.1f, RotMultMax = 8f, RotMultStep = 0.1f;
         public const float FollowYawRate = 140f;   // deg/s the follow yaw may slew at when mult=1 (stock follow turn measured at ~131 deg/s); the per-view multiplier scales this down
         public const float PivotMin = 0f, PivotMax = 8f, PivotStep = 0.1f;
         public const float ShoulderMin = -8f, ShoulderMax = 8f, ShoulderStep = 0.1f;
@@ -345,6 +345,7 @@ namespace ServoSkullCameraControls
         // and the rate that turns stick deflection into deg/sec. GpRightStick* are written by the input-layer
         // capture patch; the frame stamp lets a centred stick (which fires no Rewired event) read as zero.
         internal static float GpRightStickY;
+        internal static float GpRightStickX;
         internal static int GpRightStickFrame = -100;
         // WotR's input layer has no static Instance; its per-frame OnUpdate patch caches the live layer here
         // so the on-load direct-control flip can reach it. Unused on RT (which resolves Instance statically).
@@ -352,6 +353,7 @@ namespace ServoSkullCameraControls
         static float _gpPitch;
         static bool _gpPitchActive;
         public const float GamepadPitchRate = 90f;   // deg/sec at full stick, before the Y-sensitivity multiplier
+        public const float GamepadYawRate = 120f;    // deg/sec at full stick, before the per-view RotateSpeedMult
 
         // Foreign-patch suppression bookkeeping
         static bool _suppressSettled;
@@ -853,6 +855,14 @@ namespace ServoSkullCameraControls
             return Mathf.Abs(y) < 0.12f ? 0f : y;
         }
 
+        // Current right-stick X for yaw, or zero when centred. Same staleness/deadzone as the pitch input.
+        internal static float GamepadYawInput()
+        {
+            if (Time.frameCount - GpRightStickFrame > 1) return 0f;
+            float x = GpRightStickX;
+            return Mathf.Abs(x) < 0.12f ? 0f : x;
+        }
+
         // The pitch-hold runs only for View 1 on a pad with a set view.
         static bool GamepadPitchHoldActive()
         {
@@ -892,8 +902,10 @@ namespace ServoSkullCameraControls
                 else
                 {
                     float sensY = Mathf.Max(0.01f, settings.MouselookSensY);
+                    float mult = ActiveViewRotMult();
                     float dy = GamepadPitchInput() * sensY * GamepadPitchRate * Time.unscaledDeltaTime
-                               * (settings.GamepadInvertPitch ? -1f : 1f);   // off keeps the tuned default (+1 = stick up looks up, given the stick's Y sign); on inverts
+                               * mult
+                               * (settings.GamepadInvertPitch ? -1f : 1f);
                     float loP = MouselookPitchMin;
                     float hiP = Mathf.Clamp(settings.MaxPitchAngle, PitchHardMin, PitchHardMax);
                     if (hiP < loP) { float tmp = loP; loP = hiP; hiP = tmp; }
@@ -915,6 +927,39 @@ namespace ServoSkullCameraControls
                 }
             }
             catch (Exception e) { Log?.Error("Gamepad pitch-hold failed: " + e); }
+        }
+
+        // Gamepad yaw-speed multiplier (reuses every view's existing RotateSpeedMult). Reads the stick X directly
+        // and adds extra rotation to the camera transform, so it doesn't fight the follower's target. Stands down
+        // during the same gates as the pitch hold.
+        internal static void TickGamepadYawMult()
+        {
+            if (!CameraRig_UpdateInternal_Patch.InGamepadMode()
+                || _activeView == 0
+                || CameraRig_UpdateInternal_Patch.InCutscene()
+                || CameraRig_UpdateInternal_Patch.InDialogMode()
+                || CameraRig_UpdateInternal_Patch.InMapMode())
+            {
+                return;
+            }
+            float mult = ActiveViewRotMult();
+            float sensY = Mathf.Max(0.01f, settings.MouselookSensY);
+            float dx = GamepadYawInput() * sensY * GamepadPitchRate * Time.unscaledDeltaTime * mult;
+            if (Mathf.Approximately(dx, 0f)) return;
+            var rig = CurrentRig as Component;
+            if (rig == null) return;
+            Vector3 e = rig.transform.eulerAngles;
+            float newYaw = e.y + dx;
+            rig.transform.rotation = Quaternion.Euler(e.x, newYaw, e.z);
+            try
+            {
+                var t = Traverse.Create(rig);
+                var trf = t.Field("m_TargetRotate");
+                Vector3 tr = trf.GetValue<Vector3>();
+                tr.y = newYaw;
+                trf.SetValue(tr);
+            }
+            catch { }
         }
 
         // ---- Gamepad on-load direct character control (the L3 "Character control" toggle) -----------------
@@ -1343,11 +1388,10 @@ namespace ServoSkullCameraControls
 
         static float Snap(float value, float step) => Mathf.Round(value / step) * step;
 
-        // Per-view keyboard-rotation multiplier for whichever preset is currently active (1 if none).
+        // Per-view rotation multiplier (keyboard follow-yaw slowdown + gamepad yaw amplification) for whichever preset is currently active (1 if none).
         internal static float ActiveViewRotMult()
         {
             if (settings == null) return 1f;
-            if (CameraRig_UpdateInternal_Patch.InGamepadMode()) return 1f;   // stick turns at stock speed; the slow-down is a keyboard-strafing tool
             if (_activeView == 1) return Mathf.Clamp(settings.View1.RotateSpeedMult, RotMultMin, RotMultMax);
             if (_activeView == 2) return Mathf.Clamp(settings.View2.RotateSpeedMult, RotMultMin, RotMultMax);
             return 1f;
@@ -2043,6 +2087,7 @@ namespace ServoSkullCameraControls
                 // and pin zoom here. Because it re-asserts pitch+zoom every frame, this also doubles as the
                 // backstop that holds the view across dialogue/area transitions (no mouselook to carry it on a pad).
                 Main.TickGamepadPitchHold(hardBind);
+                Main.TickGamepadYawMult();   // amplifies right-stick yaw (any view) via RotateSpeedMult
 
                 // Follow-yaw slew limiter. The A/D turn is the follower ramping m_TargetRotate.y toward the
                 // character facing (measured ~131 deg/s), with the rig's rubber-band tracking it ~3 deg behind;
@@ -2062,7 +2107,7 @@ namespace ServoSkullCameraControls
                     float rotMult = Main.ActiveViewRotMult();
                     bool byMouse = false;
                     try { byMouse = t.Field("m_RotationByMouse").GetValue<bool>(); } catch { }
-                    bool slew = rotMult < 0.99f && !byMouse && !hardBind && !Main.MouselookEngaged() && !InCutscene();
+                    bool slew = rotMult < 0.99f && !byMouse && !hardBind && !Main.MouselookEngaged() && !InCutscene() && !InGamepadMode();
 
                     if (slew)
                     {
@@ -2894,8 +2939,8 @@ namespace ServoSkullCameraControls
 
     // ------------------------------------------------------------------------------------------------
     // Gamepad right-stick capture. Rewired decodes the stick and hands the vector to the exploration input
-    // layer's OnMoveRightStick(InputActionEventData, Vector2); we read the already-decoded Y off the Vector2
-    // (no raw-axis access) and stamp the frame, so TickGamepadPitchHold can drive View 1's pitch from it.
+    // layer's OnMoveRightStick(InputActionEventData, Vector2); we read both axes off the Vector2 and stamp the
+    // frame, so TickGamepadPitchHold can drive View 1's pitch from Y and TickGamepadYawMult can amplify yaw from X.
     // Both RT (SurfaceMainInputLayer) and WotR (InGameInputLayer) put the stick vector at argument index 1,
     // verified against both assemblies, so we bind it positionally as __1. (We deliberately avoid the __args
     // all-arguments injection: the older Harmony bundled with WotR doesn't support it and throws at patch time.)
@@ -2903,14 +2948,30 @@ namespace ServoSkullCameraControls
     [HarmonyPatch]
     static class SurfaceRightStick_Capture
     {
+        static System.Reflection.FieldInfo _rightStickVectorField;
+
         static MethodBase TargetMethod() =>
             AccessTools.Method("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer:OnMoveRightStick")
             ?? AccessTools.Method("Kingmaker.UI._ConsoleUI.InputLayers.InGameLayer.InGameInputLayer:OnMoveRightStick");
         static bool Prepare() => TargetMethod() != null;
-        static void Postfix(Vector2 __1)
+        static void Postfix(object __instance, Vector2 __1)
         {
             Main.GpRightStickY = __1.y;
+            Main.GpRightStickX = __1.x;
             Main.GpRightStickFrame = Time.frameCount;
+
+            // Suppress the game's own UpdateRightStickMovement so it doesn't apply fixed-step
+            // RotateRight/RotateLeft on top of our proportional yaw amplification. Zero the
+            // layer's m_RightStickVector when our yaw mult is active; the game's OnUpdate reads
+            // it later this frame and will see zero, skipping MoveRotateCamera entirely.
+            if (Main.Active && Main.settings != null && Main.ActiveViewNum != 0
+                && CameraRig_UpdateInternal_Patch.InGamepadMode())
+            {
+                if (_rightStickVectorField == null && __instance != null)
+                    _rightStickVectorField = AccessTools.Field(__instance.GetType(), "m_RightStickVector");
+                if (_rightStickVectorField != null)
+                    _rightStickVectorField.SetValue(__instance, Vector2.zero);
+            }
         }
     }
 
