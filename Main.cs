@@ -357,6 +357,7 @@ namespace ServoSkullCameraControls
         static bool _gpPitchActive;
         public const float GamepadPitchRate = 90f;   // deg/sec at full stick, before the Y-sensitivity multiplier
         public const float GamepadYawRate = 120f;    // deg/sec at full stick, before the per-view RotateSpeedMult
+        public const float GamepadZoomSpeed = 0.5f;  // scroll-position/sec (normalised 0-1) for D-pad zoom
 
         // Foreign-patch suppression bookkeeping
         static bool _suppressSettled;
@@ -1006,6 +1007,94 @@ namespace ServoSkullCameraControls
             }
             catch { }
         }
+
+        // ---- Gamepad zoom: hold R3 (Rewired action 19) + D-pad up/down (actions 6/7) -------------------------
+        static bool _zpInit;
+        static object _zpPlayer;
+        static System.Reflection.MethodInfo _zpGetButton;
+
+        static void InitZoomReflection()
+        {
+            if (_zpInit) return;
+            _zpInit = true;
+            try
+            {
+                var reInputType = AccessTools.TypeByName("Rewired.ReInput");
+                if (reInputType == null) return;
+                var playersProp = reInputType.GetProperty("players", BindingFlags.Public | BindingFlags.Static);
+                if (playersProp == null) return;
+                var players = playersProp?.GetValue(null);
+                if (players == null) return;
+                var pType = players.GetType();
+                var getPlayer = pType.GetMethod("GetPlayer", new[] { typeof(int) });
+                if (getPlayer != null)
+                    _zpPlayer = getPlayer.Invoke(players, new object[] { 0 });
+                if (_zpPlayer == null)
+                {
+                    var pp = pType.GetProperty("Players");
+                    if (pp != null)
+                    {
+                        var list = pp.GetValue(players);
+                        if (list != null)
+                        {
+                            var liType = list.GetType();
+                            var idxPi = liType.GetProperty("Item", new[] { typeof(int) });
+                            var idxMi = idxPi != null ? null : liType.GetMethod("get_Item", new[] { typeof(int) });
+                            if (idxPi != null)
+                                _zpPlayer = idxPi.GetValue(list, new object[] { 0 });
+                            else if (idxMi != null)
+                                _zpPlayer = idxMi.Invoke(list, new object[] { 0 });
+                        }
+                    }
+                }
+                if (_zpPlayer == null) return;
+                _zpGetButton = _zpPlayer.GetType().GetMethod("GetButton", new[] { typeof(int) });
+            }
+            catch { }
+        }
+
+        internal static void TickGamepadZoom()
+        {
+            if (!_zpInit) InitZoomReflection();
+            if (_zpPlayer == null || _zpGetButton == null) return;
+            if (!CameraRig_UpdateInternal_Patch.InGamepadMode() || CurrentRig == null) return;
+
+            bool r3Held;
+            try { r3Held = (bool)_zpGetButton.Invoke(_zpPlayer, new object[] { 19 }); }
+            catch { return; }
+            if (!r3Held) return;
+
+            float zoomDelta = 0f;
+            try
+            {
+                bool dpadUp = (bool)_zpGetButton.Invoke(_zpPlayer, new object[] { 6 });
+                bool dpadDown = (bool)_zpGetButton.Invoke(_zpPlayer, new object[] { 7 });
+                if (dpadUp) zoomDelta += GamepadZoomSpeed * Time.unscaledDeltaTime;
+                if (dpadDown) zoomDelta -= GamepadZoomSpeed * Time.unscaledDeltaTime;
+            }
+            catch { return; }
+
+            if (zoomDelta != 0f)
+            {
+                try
+                {
+                    var camZoom = Traverse.Create(CurrentRig).Property("CameraZoom").GetValue<object>();
+                    if (camZoom != null)
+                    {
+                        var tz = Traverse.Create(camZoom);
+                        float cur = tz.Field("m_PlayerScrollPosition").GetValue<float>();
+                        cur = Mathf.Clamp01(cur + zoomDelta);
+                        settings.View1.Zoom = cur;   // keep pitch-hold's pin in sync
+                        tz.Field("m_PlayerScrollPosition").SetValue(cur);
+                        tz.Field("m_ScrollPosition").SetValue(cur);
+                        tz.Field("m_SmoothScrollPosition").SetValue(cur);
+                    }
+                }
+                catch { }
+            }
+        }
+
+
 
         // ---- Gamepad on-load direct character control (the L3 "Character control" toggle) -----------------
         // The gameplay input layer carries a CursorEnabled flag (on Owlcat's GamepadInput.InputLayer base):
@@ -2137,6 +2226,7 @@ namespace ServoSkullCameraControls
                 // backstop that holds the view across dialogue/area transitions (no mouselook to carry it on a pad).
                 Main.TickGamepadPitchHold(hardBind);
                 Main.TickGamepadYawMult();   // amplifies right-stick yaw (any view) via RotateSpeedMult
+                Main.TickGamepadZoom();      // hold R3 + D-pad up/down for zoom
 
                 // Follow-yaw slew limiter. The A/D turn is the follower ramping m_TargetRotate.y toward the
                 // character facing (measured ~131 deg/s), with the rig's rubber-band tracking it ~3 deg behind;
