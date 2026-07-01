@@ -177,33 +177,37 @@ namespace ServoSkullCameraControls
         // so a missing member just yields null and we move on.
         static string DetectGameLocale()
         {
-            var lm = AccessTools.TypeByName("Kingmaker.Localization.LocalizationManager");
-            if (lm == null) return null;
-            var chains = new[]
+            try
             {
-                new[] { "CurrentLocale" },
-                new[] { "CurrentPack", "Locale" },
-                new[] { "Instance", "CurrentPack", "Locale" },
-                new[] { "Instance", "CurrentLocale" },
-            };
-            foreach (var chain in chains)
-            {
-                try
+                var lm = AccessTools.TypeByName("Kingmaker.Localization.LocalizationManager");
+                if (lm == null) return null;
+                var chains = new[]
                 {
-                    var tr = Traverse.Create(lm);
-                    object val = null;
-                    foreach (var member in chain)
+                    new[] { "CurrentLocale" },
+                    new[] { "CurrentPack", "Locale" },
+                    new[] { "Instance", "CurrentPack", "Locale" },
+                    new[] { "Instance", "CurrentLocale" },
+                };
+                foreach (var chain in chains)
+                {
+                    try
                     {
-                        var step = tr.Property(member);
-                        val = step.GetValue();
-                        if (val == null) { step = tr.Field(member); val = step.GetValue(); }
-                        if (val == null) break;
-                        tr = Traverse.Create(val);
+                        var tr = Traverse.Create(lm);
+                        object val = null;
+                        foreach (var member in chain)
+                        {
+                            var step = tr.Property(member);
+                            val = step.GetValue();
+                            if (val == null) { step = tr.Field(member); val = step.GetValue(); }
+                            if (val == null) break;
+                            tr = Traverse.Create(val);
+                        }
+                        if (val != null) return val.ToString();
                     }
-                    if (val != null) return val.ToString();
+                    catch { }
                 }
-                catch { }
             }
+            catch { }
             return null;
         }
 
@@ -385,11 +389,25 @@ namespace ServoSkullCameraControls
                 settings.PadFreeAimMigrated = true;
                 settings.Save(modEntry);
             }
-            Localization.Init(modEntry);   // pick the language file matching the game's current locale
-            Compat.Init();                 // detect RT vs WotR reflection targets (logs the UI flavour)
+            try
+            {
+                Localization.Init(modEntry);   // pick the language file matching the game's current locale
+            }
+            catch (Exception eLoad) { Log?.Error("Load: Localization.Init threw: " + eLoad); }
+            try
+            {
+                Compat.Init();                 // detect RT vs WotR reflection targets (logs the UI flavour)
+            }
+            catch (Exception eLoad) { Log?.Error("Load: Compat.Init threw: " + eLoad); }
+            Log?.Log("Load: Compat.Ui=" + Compat.Ui);
 
-            HarmonyInst = new Harmony(modEntry.Info.Id);
-            HarmonyInst.PatchAll(Assembly.GetExecutingAssembly());
+            try
+            {
+                HarmonyInst = new Harmony(modEntry.Info.Id);
+                HarmonyInst.PatchAll(Assembly.GetExecutingAssembly());
+                Log?.Log("Load: PatchAll succeeded");
+            }
+            catch (Exception e) { Log?.Error("Load: PatchAll threw: " + e); }
 
             modEntry.OnToggle = OnToggle;
             modEntry.OnUpdate = OnUpdate;
