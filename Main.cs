@@ -255,6 +255,8 @@ namespace ServoSkullCameraControls
         // undisturbed on the subject, so it normally releases in a fraction of a second rather than running full
         // length. Area-to-area transitions never set _loadPending, so they are left alone.
         const int ApplyView1DelayFrames = 4;
+        const int ViewAssertStuckFrames = 3;       // on-load: seated pitch/zoom must survive this many consecutive frames to count as settled
+        const float ViewAssertMaxSeconds = 1.0f;   // on-load: hard cap on the View-1 re-assert hold
         const int DirectControlDelayFrames = 6;   // gamepad on-load direct-control flip: wait past the area load for the gameplay input layer (SurfaceMainInputLayer.Instance) to come up
         const int PostDialogReapplyFrames = 10;   // wait this many frames after a scripted-shot conversation ends, for the exit blend to settle, before re-stamping the active view (tunable)
         const float RecenterMaxSeconds = 0.8f;     // hard cap on the on-load recenter window
@@ -267,7 +269,22 @@ namespace ServoSkullCameraControls
         static int _postDialogReapply;
         static bool _recenterActive;
         static float _recenterElapsed, _recenterSettled;
-        internal static void NotifyGameLoad() { _loadPending = true; CameraRig_UpdateInternal_Patch.ClearFollower(); CutsceneCameraGate.Reset(); }
+        static bool _viewAssertActive;    // on-load: holding View 1's pitch/zoom until it sticks or you take control
+        static int  _viewAssertStuck;     // consecutive frames the seated pitch/zoom survived unchanged
+        static float _viewAssertElapsed;  // seconds the on-load hold has run (against the hard cap)
+        internal static void NotifyGameLoad()
+        {
+            _loadPending = true;
+            CameraRig_UpdateInternal_Patch.ClearFollower();
+            CutsceneCameraGate.Reset();
+            // Clear per-session statics that otherwise survive a return-to-main-menu, so a load after being in
+            // game starts as clean as a first load: the stale mouselook seat (it would drive a wrong pitch until
+            // the on-load re-assert lands) and the vanilla capture (re-grab this session's stock camera on the
+            // next ApplyView rather than keeping the previous session's). Also drop any in-flight on-load hold.
+            CameraRig_UpdateInternal_Patch.ResetMouselookSeat();
+            _vanillaCaptured = false;
+            _viewAssertActive = false;
+        }
         internal static void NotifyAreaDidLoad()
         {
             if (!_loadPending) return;
@@ -383,7 +400,7 @@ namespace ServoSkullCameraControls
             Compat.Init();                 // detect RT vs WotR reflection targets (logs the UI flavour)
 
             HarmonyInst = new Harmony(modEntry.Info.Id);
-            HarmonyInst.PatchAll(Assembly.GetExecutingAssembly());
+            PatchAllResilient(HarmonyInst, Assembly.GetExecutingAssembly());
 
             modEntry.OnToggle = OnToggle;
             modEntry.OnUpdate = OnUpdate;
@@ -398,6 +415,32 @@ namespace ServoSkullCameraControls
                 crosshairGo.AddComponent<MouselookCrosshair>();
             }
             return true;
+        }
+
+        // Like Harmony.PatchAll, but patches each [HarmonyPatch] class in isolation so that one class whose
+        // Prepare/TargetMethod/Patch throws - e.g. a reflection lookup that turns ambiguous on some game
+        // version - is logged and skipped instead of aborting every remaining patch and failing the whole
+        // mod load. This is the same per-type CreateClassProcessor().Patch() that PatchAll runs internally,
+        // just wrapped per class. Targets that can't resolve are still expected to self-disable via their own
+        // Prepare() returning false; this only catches the harder failure where resolution itself throws.
+        static void PatchAllResilient(Harmony harmony, Assembly asm)
+        {
+            int applied = 0, skipped = 0;
+            foreach (var type in AccessTools.GetTypesFromAssembly(asm))
+            {
+                try
+                {
+                    var patched = harmony.CreateClassProcessor(type).Patch();
+                    if (patched != null && patched.Count > 0) applied++;
+                }
+                catch (Exception e)
+                {
+                    skipped++;
+                    Log?.Error("Patch class '" + type.FullName + "' could not be applied on this game version; skipping it (the rest of the mod still loads). " + e.Message);
+                }
+            }
+            if (skipped > 0)
+                Log?.Log("Harmony: " + applied + " patch class(es) applied, " + skipped + " skipped. See errors above for the skipped ones.");
         }
 
         static bool OnToggle(UnityModManager.ModEntry modEntry, bool value)
@@ -439,9 +482,31 @@ namespace ServoSkullCameraControls
                 _applyView1Countdown--;
                 if (_applyView1Countdown == 0 && settings.ApplyView1OnLoad && settings.View1.IsSet)
                 {
+                    _viewAssertActive = true; _viewAssertStuck = 0; _viewAssertElapsed = 0f;
                     ApplyView(settings.View1);
                     _activeView = 1;
-                    Log?.Log("Applied View 1 on game load.");
+                    Log?.Log("Applying View 1 on game load...");
+                }
+            }
+            else if (_viewAssertActive)
+            {
+                // Hold View 1's pitch/zoom against a still-settling save-load camera restore: re-seat each frame
+                // until the values survive unchanged for a few frames (the restore has finished) or you take
+                // control, rather than a single write a slow restore could overwrite. Mouselook takes over only
+                // once we stop, from the seat we just set. Self-logs the settle time for on-machine confirmation.
+                _viewAssertElapsed += Time.unscaledDeltaTime;
+                _viewAssertStuck = ViewSeatHeld(settings.View1) ? _viewAssertStuck + 1 : 0;
+                bool tookControl = CameraRig_UpdateInternal_Patch.FollowerActive();
+                if (_viewAssertStuck >= ViewAssertStuckFrames || tookControl || _viewAssertElapsed >= ViewAssertMaxSeconds)
+                {
+                    _viewAssertActive = false;
+                    string why = tookControl ? "took control" : (_viewAssertStuck >= ViewAssertStuckFrames ? "settled" : "cap");
+                    Log?.Log("View 1 seated on load after " + _viewAssertElapsed.ToString("0.00") + "s (" + why + ").");
+                }
+                else
+                {
+                    ApplyView(settings.View1);
+                    _activeView = 1;
                 }
             }
 
@@ -720,6 +785,28 @@ namespace ServoSkullCameraControls
                 _gpPitchActive = false;   // re-seat the gamepad pitch-hold too, so a re-stamp re-establishes the view on a pad
             }
             catch (Exception e) { Log?.Error("Applying view failed: " + e); }
+        }
+
+        // True when the rig's pitch and zoom still match view v within tolerance - i.e. the on-load camera
+        // restore has stopped overwriting our seated values. Drives the on-load hold's "settled" exit. Reads the
+        // same fields ApplyView writes (m_TargetRotate pitch, the player scroll position); both games expose them.
+        static bool ViewSeatHeld(CameraView v)
+        {
+            if (CurrentRig == null || v == null) return false;
+            try
+            {
+                var t = Traverse.Create(CurrentRig);
+                Vector3 tr = t.Field("m_TargetRotate").GetValue<Vector3>();
+                if (Mathf.Abs(Mathf.DeltaAngle(tr.x, v.Pitch)) > 0.5f) return false;
+                var zoom = t.Property("CameraZoom").GetValue<object>();
+                if (zoom != null)
+                {
+                    float sp = Traverse.Create(zoom).Field("m_PlayerScrollPosition").GetValue<float>();
+                    if (Mathf.Abs(sp - v.Zoom) > 0.01f) return false;
+                }
+                return true;
+            }
+            catch { return false; }
         }
 
         internal static void SetFloat(Traverse owner, string field, float val)
@@ -1440,12 +1527,22 @@ namespace ServoSkullCameraControls
         // restore it if the mod is disabled mid-view.
         static bool _occluderSuppressed;
 
-        static void UpdateOccluderClip()
+        // The active view wants solid walls, minus the standdowns shared by both games' suppression paths:
+        // hands off on the map, during hard-bound shots, and during in-dialogue scripted camera shots.
+        // Used by RT's occluder-clip hold below and by WotR's feature-flag postfix (OccludedHighlight patch).
+        internal static bool SolidWallsWanted()
         {
             bool want = ActiveViewObj()?.SolidWalls ?? false;
             if (CameraRig_UpdateInternal_Patch.InMapMode()) want = false;             // hands off on the system/sector map
             if (CameraRig_UpdateInternal_Patch.LastHardBind) want = false;            // hand back during hard-bound shots (scripted cinematics)
             if (CutsceneCameraGate.CameraCutsceneActive()) want = false;              // hand back during in-dialogue scripted camera shots
+            return want;
+        }
+
+        static void UpdateOccluderClip()
+        {
+            if (Compat.Ui == Compat.UiKind.WotR) return;   // WotR suppression is the OccludedHighlight feature-flag postfix, not RT's clip service
+            bool want = SolidWallsWanted();
             if (want) { OccluderClip.SetGameClipEnabled(false); _occluderSuppressed = true; }
             else if (_occluderSuppressed) { OccluderClip.SetGameClipEnabled(true); _occluderSuppressed = false; }
         }
@@ -1556,6 +1653,8 @@ namespace ServoSkullCameraControls
     {
         static float _baseNear, _baseFar;
         static bool _captured, _customActive, _triedFields, _loggedBase;
+        static bool _wotrNearOn;        // WotR: is a near-clip view live this frame (set in Apply/Restore, read by the StaticPreRender transpiler)
+        static float _wotrNear = 1f;    // WotR: the near value to pin when _wotrNearOn
         static FieldInfo _fLens, _fNcp, _fFcp;
 
         static object GetZoom(object rig) => Traverse.Create(rig).Property("CameraZoom").GetValue<object>();
@@ -1612,6 +1711,7 @@ namespace ServoSkullCameraControls
             Capture(vcam, cam);
             float n = nearOn ? Mathf.Clamp(nearVal, Main.NearClipMin, Main.NearClipMax) : _baseNear;
             float f = farOn ? Mathf.Clamp(farVal, Main.FarClipMin, Main.FarClipMax) : _baseFar;
+            _wotrNearOn = nearOn; _wotrNear = n;   // WotR near lever: the StaticPreRender transpiler reads this (RT ignores it)
             if (vcam != null) WriteVcam(vcam, n, f);
             if (cam != null) { cam.nearClipPlane = n; cam.farClipPlane = f; }
             _customActive = true;
@@ -1627,6 +1727,58 @@ namespace ServoSkullCameraControls
             if (vcam != null) WriteVcam(vcam, _baseNear, _baseFar);
             if (cam != null) { cam.nearClipPlane = _baseNear; cam.farClipPlane = _baseFar; }
             _customActive = false;
+            _wotrNearOn = false;
+        }
+
+        // Called only from the WotR StaticPreRender transpiler below (RT keeps the game's own near via its
+        // Cinemachine lens, so it never calls this). Returns the active view's near when a near-clip view is
+        // live this frame - decided by Apply/Restore in the per-frame postfix, which runs before pre-render -
+        // else the game's own default, so it is vanilla-identical when no near-clip view is active.
+        public static float WotRNearPin(float gameDefault) => _wotrNearOn ? _wotrNear : gameDefault;
+    }
+
+    // WotR near clip. WotR's CameraZoom has no Cinemachine virtual camera (the lever RT's near clip rides),
+    // so the only near lever is the Unity camera's nearClipPlane - which Kingmaker.Visual.RenderingManager
+    // .StaticPreRender hard-pins to a constant 1.0 each pre-render frame and then feeds into depth
+    // reconstruction and screen-space reflections. A direct camera write from our postfix loses to that pin,
+    // and a postfix on StaticPreRender would win the render near but desync reconstruction/SSR (both read the
+    // near live, within StaticPreRender, before our postfix could run). So we transpile the pinned value
+    // itself: replace the constant that StaticPreRender pushes into Camera.set_nearClipPlane with our
+    // provider, setting near BEFORE the reconstruction/SSR reads so the whole depth pipeline stays consistent
+    // at our value. RT-gated out (its near rides the vcam lens; its StaticPreRender pin is not the lever),
+    // leaving RT byte-identical.
+    [HarmonyPatch]
+    static class RenderingManager_StaticPreRender_WotRNearPatch
+    {
+        static bool Prepare() => Compat.Ui == Compat.UiKind.WotR
+            && AccessTools.Method("Kingmaker.Visual.RenderingManager:StaticPreRender") != null;
+
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.Visual.RenderingManager:StaticPreRender");
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+        {
+            var codes = new List<CodeInstruction>(instructions);
+            var setNear = AccessTools.Method("UnityEngine.Camera:set_nearClipPlane");
+            var pin = AccessTools.Method(typeof(ClipPlane), "WotRNearPin");
+            if (setNear != null && pin != null)
+            {
+                for (int i = 0; i < codes.Count; i++)
+                {
+                    var op = codes[i].opcode;
+                    if ((op == System.Reflection.Emit.OpCodes.Callvirt || op == System.Reflection.Emit.OpCodes.Call)
+                        && setNear.Equals(codes[i].operand))
+                    {
+                        // Stack here is [camera, near]; our static float(float) consumes the near and pushes
+                        // ours, leaving [camera, near'] for the setter. Insert before the setter so the value
+                        // is in place for the reconstruction/SSR reads that follow in the same method.
+                        codes.Insert(i, new CodeInstruction(System.Reflection.Emit.OpCodes.Call, pin));
+                        Main.Log?.Log("Clip: WotR near-pin transpiler applied to StaticPreRender - near clip is now live on Wrath.");
+                        return codes;
+                    }
+                }
+            }
+            Main.Log?.Error("Clip: WotR near-pin transpiler did not find Camera.set_nearClipPlane in StaticPreRender - near clip stays at the game default on WotR.");
+            return codes;
         }
     }
 
@@ -1661,6 +1813,50 @@ namespace ServoSkullCameraControls
             if (_setEnabled == null) return;
             try { _setEnabled.Invoke(null, new object[] { on }); }
             catch (Exception e) { Main.Log?.Error("OccluderClip.SetGameClipEnabled failed: " + e); }
+        }
+    }
+
+    // ===== WotR: solid walls = suppress the OccludedObjectHighlighting feature. =====
+    // WotR has no OcclusionGeometryClip service; its camera see-through is the SRP's
+    // OccludedObjectHighlighting renderer feature - a depth-clip pass that NOISE-DISSOLVES geometry
+    // sitting in front of per-unit clipper blobs (and geometry within NearCameraClipDistance of the
+    // camera), plus a silhouette highlight for the occluded units. This is what eats wagons/market
+    // stands on a low, dollied-in view: at shoulder height, scenery lines up in front of units far more
+    // often than from the vanilla high camera, and the dissolve is distance/position-driven (empirically
+    // rotation-insensitive - the blob positions depend on camera POSITION only). WOTR_COMPAT §2's
+    // "highlighting, not dissolve - nothing to suppress" was wrong.
+    // The engine gates the whole feature in-shader on one global float, _OccludedObjectHighlightingFeatureEnabled:
+    // AddRenderPasses sets it to 1 every frame it runs (and its own non-game-camera path sets 0 via
+    // DisableFeature), so a 0 is a fully supported off state - no pass skipping, no stale render targets.
+    // This postfix lands after the game's 1-write each frame and forces 0 while the active view wants
+    // solid walls; the moment it stops (toggle off, cutscene standdown, mod disabled) the game's own
+    // per-frame write restores the feature - self-healing, no restore path needed.
+    // Trade-off, deliberate: while suppressed the occluded-unit SILHOUETTES are off too (one flag gates
+    // the whole feature in-shader).
+    [HarmonyPatch]
+    static class OccludedHighlight_SolidWalls_WotRPatch
+    {
+        static MethodBase TargetMethod() => AccessTools.Method(
+            "Owlcat.Runtime.Visual.RenderPipeline.RendererFeatures.OccludedObjectHighlighting.OccludedObjectHighlightingFeature:AddRenderPasses");
+
+        static bool Prepare() => Compat.Ui == Compat.UiKind.WotR && TargetMethod() != null;
+
+        static bool _logged;
+
+        static void Postfix()
+        {
+            try
+            {
+                if (!Main.Active || Main.settings == null) return;
+                if (!Main.SolidWallsWanted()) return;
+                Shader.SetGlobalFloat("_OccludedObjectHighlightingFeatureEnabled", 0f);
+                if (!_logged)
+                {
+                    _logged = true;
+                    Main.Log?.Log("SolidWalls (WotR): suppressing the occluded-object dissolve/highlight feature while this view is active.");
+                }
+            }
+            catch { }   // never let a render-setup hook throw into the pipeline
         }
     }
 
@@ -2426,6 +2622,36 @@ namespace ServoSkullCameraControls
         internal enum UiKind { Unknown, RT, WotR }
         internal static UiKind Ui = UiKind.Unknown;
 
+        // CommandControlCamera.OnRun has version-dependent overloads. WotR's CommandBase declares BOTH
+        // OnRun(player, skipping) and OnRun(player, track, skipping); on some game builds CommandControlCamera
+        // overrides both, on others only the two-arg form. A bare AccessTools.Method("...:OnRun") does a
+        // name-only reflection lookup that throws AmbiguousMatchException the moment two overloads are visible
+        // on the type - and because that threw inside a Harmony Prepare(), it aborted the ENTIRE PatchAll and
+        // the mod failed to load (reported on Wrath). Resolve the intended lifecycle entry - the
+        // (CutscenePlayerData player, bool skipping) form the mod has always gated on - deterministically by
+        // enumeration, derived type first then base, so overload count never matters.
+        internal static MethodBase ResolveCommandControlCameraOnRun()
+        {
+            var t = AccessTools.TypeByName("Kingmaker.AreaLogic.Cutscenes.Commands.CommandControlCamera");
+            var m = PickTwoArgOnRun(t);
+            if (m == null && t != null) m = PickTwoArgOnRun(t.BaseType);
+            return m;
+        }
+
+        static MethodBase PickTwoArgOnRun(Type t)
+        {
+            if (t == null) return null;
+            MethodInfo fallback = null;
+            foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+            {
+                if (m.Name != "OnRun") continue;
+                var ps = m.GetParameters();
+                if (ps.Length == 2 && ps[1].ParameterType == typeof(bool)) return m;   // the entry the mod gates on
+                if (fallback == null) fallback = m;
+            }
+            return fallback;
+        }
+
         // RootUIContext: RT "Kingmaker.Code.UI.MVVM.RootUIContext", WotR "Kingmaker.UI.MVVM.RootUIContext".
         internal static Type RootUIContext;
 
@@ -2873,7 +3099,7 @@ namespace ServoSkullCameraControls
     [HarmonyPatch]
     static class ControlCamera_OnRun_Gate
     {
-        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.AreaLogic.Cutscenes.Commands.CommandControlCamera:OnRun");
+        static MethodBase TargetMethod() => Compat.ResolveCommandControlCameraOnRun();
         static bool Prepare() => TargetMethod() != null;
         static void Postfix() => CutsceneCameraGate.OnCamCommandRun();
     }
