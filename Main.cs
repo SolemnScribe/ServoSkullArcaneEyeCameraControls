@@ -71,6 +71,8 @@ namespace ServoSkullCameraControls
         public int ToggleKey   = (int)KeyCode.CapsLock;
         public int GamepadToggleKey = (int)KeyCode.JoystickButton4;   // gamepad view-toggle; defaults to the Xbox Left Bumper (LB). The D-pad reports as an axis, not a button, so Unity's input can't bind it here; rebindable to any pad button in settings
         public bool GamepadInvertPitch = false;  // invert the right-stick pitch on a pad. Off = stick up looks up; on flips it. Needs its own flag, not MouselookInvertY: the stick vector's Y sign is already opposite Unity's Mouse Y, so the same factor reads the other way round on a pad
+        public float GamepadDeadzone = 0.12f;    // right-stick centre deadzone for the mod's own reads (pitch-hold, yaw takeover); the game's native input keeps its own calibration. Values above it are remapped to a smooth 0-1 so there's no response step at the edge
+        public float GamepadYawSpeedMult = 1f;   // right-stick turn-speed multiplier on a pad. At 1.0 the game's native turn is untouched; any other value has the mod take over stick-X yaw at (mult x GamepadYawRate) deg/s and suppress the native turn so the two don't stack. Contributed by @saghm (NexusMods/GitHub), reworked
 
         // Which targets the toggle key steps through, in the order View 1 -> View 2 -> Vanilla. A preset
         // is only included when it is also saved; Vanilla is the game's own camera (no preset). Defaults:
@@ -332,6 +334,8 @@ namespace ServoSkullCameraControls
         public const float FarClipMin = 50f, FarClipMax = 4000f, FarClipStep = 25f;   // provisional - calibrate FarClipMax to the game's logged baseline far
         public const float MouseSensMin = 0.2f, MouseSensMax = 10f, MouseSensStep = 0.1f;
         public const float RotMultMin = 0.1f, RotMultMax = 2f, RotMultStep = 0.05f;
+        public const float DeadzoneMin = 0f, DeadzoneMax = 0.5f, DeadzoneStep = 0.01f;
+        public const float GpYawMultMin = 0.1f, GpYawMultMax = 8f, GpYawMultStep = 0.1f;
         public const float FollowYawRate = 140f;   // deg/s the follow yaw may slew at when mult=1 (stock follow turn measured at ~131 deg/s); the per-view multiplier scales this down
         public const float PivotMin = 0f, PivotMax = 8f, PivotStep = 0.1f;
         public const float ShoulderMin = -8f, ShoulderMax = 8f, ShoulderStep = 0.1f;
@@ -362,6 +366,7 @@ namespace ServoSkullCameraControls
         // and the rate that turns stick deflection into deg/sec. GpRightStick* are written by the input-layer
         // capture patch; the frame stamp lets a centred stick (which fires no Rewired event) read as zero.
         internal static float GpRightStickY;
+        internal static float GpRightStickX;
         internal static int GpRightStickFrame = -100;
         // WotR's input layer has no static Instance; its per-frame OnUpdate patch caches the live layer here
         // so the on-load direct-control flip can reach it. Unused on RT (which resolves Instance statically).
@@ -369,6 +374,8 @@ namespace ServoSkullCameraControls
         static float _gpPitch;
         static bool _gpPitchActive;
         public const float GamepadPitchRate = 90f;   // deg/sec at full stick, before the Y-sensitivity multiplier
+        public const float GamepadYawRate = 120f;    // deg/sec at full stick when the yaw takeover owns the turn, before GamepadYawSpeedMult
+        public const float GamepadZoomSpeed = 0.6f;   // zoom scroll-position/sec (0-1 scale) at full stick while R3 is held
 
         // Foreign-patch suppression bookkeeping
         static bool _suppressSettled;
@@ -396,8 +403,10 @@ namespace ServoSkullCameraControls
                 settings.PadFreeAimMigrated = true;
                 settings.Save(modEntry);
             }
-            Localization.Init(modEntry);   // pick the language file matching the game's current locale
-            Compat.Init();                 // detect RT vs WotR reflection targets (logs the UI flavour)
+            try { Localization.Init(modEntry); }   // pick the language file matching the game's current locale
+            catch (Exception eLoc) { Log?.Error("Load: Localization.Init threw (continuing in English): " + eLoc); }
+            try { Compat.Init(); }                  // detect RT vs WotR reflection targets (logs the UI flavour)
+            catch (Exception eCompat) { Log?.Error("Load: Compat.Init threw: " + eCompat); }
 
             HarmonyInst = new Harmony(modEntry.Info.Id);
             PatchAllResilient(HarmonyInst, Assembly.GetExecutingAssembly());
@@ -930,14 +939,113 @@ namespace ServoSkullCameraControls
             catch (Exception e) { Log?.Error("Zero rig pitch for cutscene failed: " + e); }
         }
 
+        // The user deadzone, applied to the mod's own stick reads only (the game's native input keeps its
+        // Rewired calibration). Above the deadzone the value is remapped (|v|-dz)/(1-dz) so the response
+        // rises smoothly from 0 at the deadzone edge to 1 at full deflection - no step, no hidden floor.
+        static float ApplyStickDeadzone(float v)
+        {
+            float dz = Mathf.Clamp(settings != null ? settings.GamepadDeadzone : 0.12f, DeadzoneMin, Mathf.Min(DeadzoneMax, 0.95f));
+            float a = Mathf.Abs(v);
+            if (a <= dz) return 0f;
+            return Mathf.Sign(v) * Mathf.Min(1f, (a - dz) / (1f - dz));
+        }
+
         // Current right-stick Y for pitch, or zero when the stick is centred. Rewired fires OnMoveRightStick
-        // only while the stick is deflected, so a stamp older than this frame means "centred"; a small deadzone
-        // guards against residual drift.
+        // only while the stick is deflected, so a stamp older than this frame means "centred"; the user
+        // deadzone guards against residual drift.
         internal static float GamepadPitchInput()
         {
             if (Time.frameCount - GpRightStickFrame > 1) return 0f;
-            float y = GpRightStickY;
-            return Mathf.Abs(y) < 0.12f ? 0f : y;
+            return ApplyStickDeadzone(GpRightStickY);
+        }
+
+        // Current right-stick X for the yaw takeover, same staleness rule and deadzone as the pitch input.
+        internal static float GamepadYawInput()
+        {
+            if (Time.frameCount - GpRightStickFrame > 1) return 0f;
+            return ApplyStickDeadzone(GpRightStickX);
+        }
+
+        // The yaw takeover owns stick-X yaw whenever the multiplier is dialled off 1.0 and nothing scripted
+        // has the camera. Shared verbatim by the per-frame tick (applies the turn) and the input-capture
+        // prefix (zeroes the vector's X so the game's native turn doesn't stack on top) - the two must agree
+        // or a frame of double-turn slips through. Stick-Y is never touched: View 2 keeps its native zoom,
+        // and View 1's zoom is pinned by the pitch-hold anyway.
+        internal static bool GamepadYawTakeoverActive()
+        {
+            if (!Active || settings == null || _activeView == 0) return false;
+            if (Mathf.Abs(settings.GamepadYawSpeedMult - 1f) < 0.01f) return false;   // at 1.0 the native turn is untouched
+            if (!CameraRig_UpdateInternal_Patch.InGamepadMode()) return false;
+            if (CameraRig_UpdateInternal_Patch.LastHardBind
+                || CameraRig_UpdateInternal_Patch.InCutscene()
+                || CameraRig_UpdateInternal_Patch.InDialogMode()
+                || CameraRig_UpdateInternal_Patch.InMapMode()
+                || CutsceneCameraGate.CameraCutsceneActive()) return false;
+            return true;
+        }
+
+        // View 1 on a pad owns the right stick (pitch-hold, yaw takeover, R3 zoom), so the game's R3
+        // rotate/pan mode toggle is suppressed there: without this, every R3 zoom chord would also flip the
+        // player into camera-panning mode. Used by the toggle-skip prefix below and by the pitch-hold, which
+        // additionally HOLDS Player.IsCameraRotateMode true each frame so entering View 1 from pan mode lands
+        // in rotate mode. Both games carry the identical Kingmaker.Player.IsCameraRotateMode field.
+        internal static bool SuppressPanModeToggle()
+        {
+            return Active && settings != null && _activeView == 1
+                && settings.View1 != null && settings.View1.IsSet
+                && CameraRig_UpdateInternal_Patch.InGamepadMode();
+        }
+
+        static bool _playerFieldResolved;
+        static System.Reflection.PropertyInfo _playerProp;
+        static System.Reflection.FieldInfo _rotateModeField;
+
+        internal static void HoldCameraRotateMode()
+        {
+            try
+            {
+                if (!CameraRig_UpdateInternal_Patch.TryGetGame(out object game)) return;
+                if (!_playerFieldResolved)
+                {
+                    _playerFieldResolved = true;
+                    _playerProp = AccessTools.Property(game.GetType(), "Player");
+                    var pType = _playerProp?.PropertyType ?? AccessTools.TypeByName("Kingmaker.Player");
+                    if (pType != null) _rotateModeField = AccessTools.Field(pType, "IsCameraRotateMode");
+                }
+                object player = _playerProp?.GetValue(game, null);
+                if (player == null || _rotateModeField == null) return;
+                if (!(bool)_rotateModeField.GetValue(player))
+                    _rotateModeField.SetValue(player, true);   // View 1 owns the stick; keep the rig in rotate mode
+            }
+            catch { }
+        }
+
+        // Applies the taken-over yaw: the stick turns the camera at GamepadYawRate x GamepadYawSpeedMult
+        // deg/s. Writes the transform yaw and m_TargetRotate.y together - the same pattern mouselook uses -
+        // so the rig's rubber-band doesn't slerp the turn back. Native rotation is suppressed at the source
+        // (the capture prefix zeroes stick X) while the takeover is active. Contributed by @saghm, reworked:
+        // separate multiplier (View 1 ships RotateSpeedMult at 0.1 as a keyboard strafing tool, so reusing it
+        // crawled), X-only suppression via the argument (WotR's input layer is static and has no
+        // m_RightStickVector field, so the original instance-field approach silently no-opped there).
+        internal static void TickGamepadYawTakeover(bool hardBind)
+        {
+            if (hardBind || CurrentRig == null || !GamepadYawTakeoverActive()) return;
+            float dx = GamepadYawInput() * GamepadYawRate * Time.unscaledDeltaTime
+                       * Mathf.Clamp(settings.GamepadYawSpeedMult, GpYawMultMin, GpYawMultMax);
+            if (Mathf.Approximately(dx, 0f)) return;
+            try
+            {
+                var rig = CurrentRig as Component;
+                if (rig == null) return;
+                Vector3 e = rig.transform.eulerAngles;
+                float newYaw = e.y + dx;
+                rig.transform.rotation = Quaternion.Euler(e.x, newYaw, e.z);
+                var trf = Traverse.Create(rig).Field("m_TargetRotate");
+                Vector3 tr = trf.GetValue<Vector3>();
+                tr.y = newYaw;
+                trf.SetValue(tr);
+            }
+            catch (Exception e2) { Log?.Error("Gamepad yaw takeover failed: " + e2); }
         }
 
         // The pitch-hold runs only for View 1 on a pad with a set view.
@@ -968,6 +1076,7 @@ namespace ServoSkullCameraControls
             }
             try
             {
+                HoldCameraRotateMode();   // View 1 owns the stick: keep the game's R3 rotate/pan flag in rotate mode
                 var t = Traverse.Create(CurrentRig);
                 var trf = t.Field("m_TargetRotate");
                 Vector3 tr = trf.GetValue<Vector3>();
@@ -975,6 +1084,17 @@ namespace ServoSkullCameraControls
                 {
                     _gpPitch = tr.x;          // seat on the current pitch (the freshly-applied view) - no snap
                     _gpPitchActive = true;
+                }
+                else if (UnityEngine.Input.GetKey(KeyCode.JoystickButton9))
+                {
+                    // R3 held: the stick's up/down becomes zoom for as long as the click is held (View 1 has no
+                    // native stick zoom - the pitch-hold owns Y). Adjusts the view's SAVED zoom, which the pin
+                    // below applies this same frame, so the panel slider and the stick stay one value. The pitch
+                    // holds still while zooming. R3 is a real pad button (unlike the D-pad, which reports as an
+                    // axis and can't be read as a key), so this needs no per-game input-action IDs.
+                    // Feature suggested by @saghm (their R3+D-pad variant needed unverifiable Rewired action IDs).
+                    float dzoom = GamepadPitchInput() * GamepadZoomSpeed * Time.unscaledDeltaTime;
+                    settings.View1.Zoom = Mathf.Clamp(settings.View1.Zoom + dzoom, ViewZoomMin, ViewZoomMax);
                 }
                 else
                 {
@@ -1215,6 +1335,16 @@ namespace ServoSkullCameraControls
             GUILayout.EndHorizontal();
             GUILayout.Label("     " + L("\u2013 the toggle key steps through the ticked targets in order; Vanilla is the game's own camera."));
             settings.GamepadInvertPitch = GUILayout.Toggle(settings.GamepadInvertPitch, "     " + L("Invert gamepad pitch  \u2013 flip the right-stick up/down look direction (View 1 on a pad)"));
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     " + L("gamepad deadzone: ") + settings.GamepadDeadzone.ToString("0.00"), GUILayout.Width(185f));
+            settings.GamepadDeadzone = Snap(GUILayout.HorizontalSlider(settings.GamepadDeadzone, DeadzoneMin, DeadzoneMax, GUILayout.Width(235f)), DeadzoneStep);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     " + L("gamepad turn speed: ") + settings.GamepadYawSpeedMult.ToString("0.0") + "\u00d7", GUILayout.Width(185f));
+            settings.GamepadYawSpeedMult = Snap(GUILayout.HorizontalSlider(settings.GamepadYawSpeedMult, GpYawMultMin, GpYawMultMax, GUILayout.Width(235f)), GpYawMultStep);
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     " + L("\u2013 1.0\u00d7 leaves the game's own turn untouched; other values replace it with a proportional turn"));
+            GUILayout.Label("     " + L("\u2013 hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)"));
             settings.DirectControlOnGamepadLoad = GUILayout.Toggle(settings.DirectControlOnGamepadLoad, "     " + L("Direct character control on gamepad load  \u2013 the left stick moves your character (click the stick to toggle)"));
             settings.ApplyView1OnLoad = GUILayout.Toggle(settings.ApplyView1OnLoad, "  " + L("Apply View 1 on game load (area-to-area transitions keep the current camera)"));
 
@@ -1951,7 +2081,7 @@ namespace ServoSkullCameraControls
         internal static bool FollowerActive() => TryGetLiveSubjectPos(out _);
 
         // Resolve the Game singleton once, then reuse it for the player/selection lookups below.
-        static bool TryGetGame(out object game)
+        internal static bool TryGetGame(out object game)
         {
             game = null;
             if (!_gameInstResolved)
@@ -2239,6 +2369,7 @@ namespace ServoSkullCameraControls
                 // and pin zoom here. Because it re-asserts pitch+zoom every frame, this also doubles as the
                 // backstop that holds the view across dialogue/area transitions (no mouselook to carry it on a pad).
                 Main.TickGamepadPitchHold(hardBind);
+                Main.TickGamepadYawTakeover(hardBind);   // right-stick turn-speed multiplier (all views); inert at 1.0
 
                 // Follow-yaw slew limiter. The A/D turn is the follower ramping m_TargetRotate.y toward the
                 // character facing (measured ~131 deg/s), with the rig's rubber-band tracking it ~3 deg behind;
@@ -3120,8 +3251,13 @@ namespace ServoSkullCameraControls
 
     // ------------------------------------------------------------------------------------------------
     // Gamepad right-stick capture. Rewired decodes the stick and hands the vector to the exploration input
-    // layer's OnMoveRightStick(InputActionEventData, Vector2); we read the already-decoded Y off the Vector2
-    // (no raw-axis access) and stamp the frame, so TickGamepadPitchHold can drive View 1's pitch from it.
+    // layer's OnMoveRightStick(InputActionEventData, Vector2); we read the already-decoded axes off the Vector2
+    // (no raw-axis access) and stamp the frame, so TickGamepadPitchHold can drive View 1's pitch from Y and
+    // TickGamepadYawTakeover can drive yaw from X. A PREFIX with ref access, not a postfix: when the yaw
+    // takeover is active it zeroes the vector's X in place (after capturing the original), which suppresses the
+    // game's native turn at the source in BOTH games - RT stores the argument in m_RightStickVector for its
+    // OnUpdate rotate, WotR's (static) handler rotates from the argument directly - so no per-game field
+    // reflection is needed and stick-Y (View 2's native zoom) is never touched.
     // Both RT (SurfaceMainInputLayer) and WotR (InGameInputLayer) put the stick vector at argument index 1,
     // verified against both assemblies, so we bind it positionally as __1. (We deliberately avoid the __args
     // all-arguments injection: the older Harmony bundled with WotR doesn't support it and throws at patch time.)
@@ -3133,11 +3269,31 @@ namespace ServoSkullCameraControls
             AccessTools.Method("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer:OnMoveRightStick")
             ?? AccessTools.Method("Kingmaker.UI._ConsoleUI.InputLayers.InGameLayer.InGameInputLayer:OnMoveRightStick");
         static bool Prepare() => TargetMethod() != null;
-        static void Postfix(Vector2 __1)
+        static void Prefix(ref Vector2 __1)
         {
             Main.GpRightStickY = __1.y;
+            Main.GpRightStickX = __1.x;
             Main.GpRightStickFrame = Time.frameCount;
+            if (Main.GamepadYawTakeoverActive())
+                __1.x = 0f;   // the mod owns the turn this frame; don't let the native rotate stack on it
         }
+    }
+
+    // The game's R3 click toggles the pad camera between rotate mode and panning/free-camera mode
+    // (Game.Instance.Player.IsCameraRotateMode, identical field in both games; RT flips it in
+    // SurfaceHUDConsoleView.ChangeCameraRotateMode, WotR in InGameConsoleView.OnChangeCameraRotateMode,
+    // each also playing a click sound / refreshing the hint). View 1 uses R3-hold as the zoom chord, so the
+    // toggle is suppressed outright there - skipping the handler suppresses the flip, the sound and the hint
+    // together. Other views and mouse mode keep the native toggle; the local-map screen has its own handler,
+    // which is deliberately not touched.
+    [HarmonyPatch]
+    static class CameraRotateModeToggle_Gate
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method("Kingmaker.Code.UI.MVVM.View.SurfaceCombat.Console.SurfaceHUDConsoleView:ChangeCameraRotateMode")
+            ?? AccessTools.Method("Kingmaker.UI.MVVM._ConsoleView.InGame.InGameConsoleView:OnChangeCameraRotateMode");
+        static bool Prepare() => TargetMethod() != null;
+        static bool Prefix() => !Main.SuppressPanModeToggle();   // false = swallow the R3 toggle while View 1 owns the stick
     }
 
     // ------------------------------------------------------------------------------------------------

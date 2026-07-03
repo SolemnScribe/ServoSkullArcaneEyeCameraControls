@@ -2,7 +2,7 @@
   "LanguageCode": "en",
   "Version": "1.0",
   "Contributors": [
-    "SolemnScribe"
+    "SolemnScribe, saghm"
   ],
   "HomePage": "https://www.nexusmods.com/warhammer40kroguetrader/mods/457",
   "Strings": {
@@ -20,6 +20,10 @@
     "Vanilla": "Vanilla",
     "– the toggle key steps through the ticked targets in order; Vanilla is the game's own camera.": "– the toggle key steps through the ticked targets in order; Vanilla is the game's own camera.",
     "Invert gamepad pitch  – flip the right-stick up/down look direction (View 1 on a pad)": "Invert gamepad pitch  – flip the right-stick up/down look direction (View 1 on a pad)",
+    "gamepad deadzone: ": "gamepad deadzone: ",
+    "gamepad turn speed: ": "gamepad turn speed: ",
+    "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn",
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)",
     "Direct character control on gamepad load  – the left stick moves your character (click the stick to toggle)": "Direct character control on gamepad load  – the left stick moves your character (click the stick to toggle)",
     "Apply View 1 on game load (area-to-area transitions keep the current camera)": "Apply View 1 on game load (area-to-area transitions keep the current camera)",
     "Focus offset  (enables each view's pivot + shoulder + dolly)": "Focus offset  (enables each view's pivot + shoulder + dolly)",
