@@ -76,6 +76,10 @@
     "near clip": "ближняя плоскость отсечения",
     "far clip": "дальняя плоскость отсечения",
     "solid walls  – stop walls/doors dissolving in front of the camera in this view": "сплошные стены  – не дают стенам/дверям растворяться перед камерой в этом виде",
-    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "свободное наведение курсора (геймпад)  – в режиме курсора левый стик перемещает указатель по экрану, а не панорамирует камеру"
+    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "свободное наведение курсора (геймпад)  – в режиме курсора левый стик перемещает указатель по экрану, а не панорамирует камеру",
+    "gamepad deadzone: ": "мёртвая зона геймпада: ",
+    "gamepad turn speed: ": "скорость поворота (геймпад): ",
+    "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1,0× не трогает поворот самой игры; другие значения заменяют его пропорциональным поворотом",
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– удерживайте нажатие правого стика (R3) и отклоняйте стик вверх/вниз для зума (Вид 1 на геймпаде)"
   }
 }

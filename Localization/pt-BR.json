@@ -76,6 +76,10 @@
     "near clip": "plano próximo",
     "far clip": "plano distante",
     "solid walls  – stop walls/doors dissolving in front of the camera in this view": "paredes sólidas  – impede que paredes/portas se dissolvam diante da câmera nesta visão",
-    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "cursor de mira livre (gamepad)  – no controle de cursor, o analógico esquerdo move o ponteiro pela tela em vez de dar panorâmica na câmera"
+    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "cursor de mira livre (gamepad)  – no controle de cursor, o analógico esquerdo move o ponteiro pela tela em vez de dar panorâmica na câmera",
+    "gamepad deadzone: ": "zona morta do controle: ",
+    "gamepad turn speed: ": "velocidade de giro do controle: ",
+    "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1,0× mantém o giro do próprio jogo; outros valores o substituem por um giro proporcional",
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– segure o clique do analógico direito (R3) e empurre o analógico para cima/baixo para dar zoom (Visão 1 no controle)"
   }
 }

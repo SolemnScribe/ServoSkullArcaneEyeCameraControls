@@ -76,6 +76,10 @@
     "near clip": "nahe Clipping-Ebene",
     "far clip": "ferne Clipping-Ebene",
     "solid walls  – stop walls/doors dissolving in front of the camera in this view": "solide Wände  – verhindert, dass Wände/Türen vor der Kamera in dieser Ansicht ausgeblendet werden",
-    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "Freihand-Cursor (Gamepad)  – in der Cursor-Steuerung bewegt der linke Stick den Zeiger über den Bildschirm, statt die Kamera zu schwenken"
+    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "Freihand-Cursor (Gamepad)  – in der Cursor-Steuerung bewegt der linke Stick den Zeiger über den Bildschirm, statt die Kamera zu schwenken",
+    "gamepad deadzone: ": "Gamepad-Totzone: ",
+    "gamepad turn speed: ": "Gamepad-Drehgeschwindigkeit: ",
+    "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1,0× lässt die spieleigene Drehung unangetastet; andere Werte ersetzen sie durch eine proportionale Drehung",
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– halte den Rechts-Stick-Klick (R3) gedrückt und drücke den Stick nach oben/unten zum Zoomen (Ansicht 1 am Gamepad)"
   }
 }

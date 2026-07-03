@@ -76,6 +76,10 @@
     "near clip": "近クリップ",
     "far clip": "遠クリップ",
     "solid walls  – stop walls/doors dissolving in front of the camera in this view": "ソリッドウォール  – このビューでカメラ手前の壁／ドアが透けるのを防ぎます",
-    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "フリーエイムカーソル（ゲームパッド）  – カーソル操作中、左スティックはカメラをパンする代わりにポインターを画面上で動かします"
+    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "フリーエイムカーソル（ゲームパッド）  – カーソル操作中、左スティックはカメラをパンする代わりにポインターを画面上で動かします",
+    "gamepad deadzone: ": "ゲームパッドのデッドゾーン: ",
+    "gamepad turn speed: ": "ゲームパッドの回転速度: ",
+    "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1.0×はゲーム本来の回転をそのまま維持し、他の値では比例回転に置き換わります",
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– 右スティック押し込み（R3）を押しながらスティックを上下に倮すとズーム（パッドのビュー1）"
   }
 }

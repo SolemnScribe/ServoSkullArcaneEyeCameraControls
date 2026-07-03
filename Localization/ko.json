@@ -76,6 +76,10 @@
     "near clip": "근거리 클립",
     "far clip": "원거리 클립",
     "solid walls  – stop walls/doors dissolving in front of the camera in this view": "단단한 벽  – 이 시점에서 카메라 앞의 벽/문이 사라지는 것을 방지합니다",
-    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "자유 조준 커서 (게임패드)  – 커서 조작 중에는 왼쪽 스틱이 카메라를 패닝하는 대신 포인터를 화면에서 움직입니다"
+    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "자유 조준 커서 (게임패드)  – 커서 조작 중에는 왼쪽 스틱이 카메라를 패닝하는 대신 포인터를 화면에서 움직입니다",
+    "gamepad deadzone: ": "게임패드 데드존: ",
+    "gamepad turn speed: ": "게임패드 회전 속도: ",
+    "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1.0×는 게임 자체 회전을 그대로 두고, 다른 값은 비례 회전으로 대체합니다",
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– 오른스틱 클릭(R3)을 누른 채 스틱을 위/아래로 밀면 줌(패드의 뷰 1)"
   }
 }
