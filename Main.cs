@@ -1830,37 +1830,115 @@ namespace ServoSkullCameraControls
         }
     }
 
-    // Toggles RT's occluder see-through - the render-pipeline service that dissolves walls and doors
-    // between the camera and your party so you can see units behind cover. Disabling it leaves that
-    // geometry solid. The lever is the static Owlcat.Runtime.Visual.OcclusionGeometryClip.System.SetEnabled,
-    // which stops/starts the whole clip service; it no-ops when the value is unchanged, so re-asserting it
-    // each frame is cheap. Resolved by reflection so the mod needs no reference to the visual assembly.
+    // Toggles the game's wall/geometry dissolve so doors and walls in front of the camera stay solid.
+    // On RT:  Owlcat.Runtime.Visual.OcclusionGeometryClip.System.SetEnabled stops/starts the clip service.
+    // On WotR: we call OwlcatAdditionalCameraData.DisableFeature/EnableFeature on the main camera for
+    //          the OccludedObjectHighlightingFeature instance, matching the game's own cutscene code
+    //          in DirectorCameraLink. Re-asserted each frame because area loads restart the service.
     static class OccluderClip
     {
+        // RT path
         static MethodInfo _setEnabled;
+        // WotR path
+        static object _wrathFeature;
+        static Type _camDataType;
+        static MethodInfo _disableMethod, _enableMethod;
+        static Camera _cachedCam;
         static bool _resolved, _warned;
 
         static void Resolve()
         {
             if (_resolved) return;
             _resolved = true;
-            var t = AccessTools.TypeByName("Owlcat.Runtime.Visual.OcclusionGeometryClip.System");
-            if (t != null) _setEnabled = AccessTools.Method(t, "SetEnabled", new[] { typeof(bool) });
-            if (_setEnabled == null && !_warned)
-            {
-                _warned = true;
-                Main.Log?.Error("OccluderClip: OcclusionGeometryClip.System.SetEnabled not found - the solid-walls toggle will do nothing.");
-            }
+            if (Compat.Ui == Compat.UiKind.WotR) ResolveWrath();
+            else ResolveRT();
         }
 
-        // on == true  -> the game's clip service runs (normal see-through)
-        // on == false -> service stopped (walls and doors stay solid)
+        static void ResolveRT()
+        {
+            var t = AccessTools.TypeByName("Owlcat.Runtime.Visual.OcclusionGeometryClip.System");
+            if (t != null) _setEnabled = AccessTools.Method(t, "SetEnabled", new[] { typeof(bool) });
+        }
+
+        static void ResolveWrath()
+        {
+            try
+            {
+                _camDataType = AccessTools.TypeByName("Owlcat.Runtime.Visual.RenderPipeline.OwlcatAdditionalCameraData");
+                if (_camDataType == null) { Warn(); return; }
+                _disableMethod = AccessTools.Method(_camDataType, "DisableFeature");
+                _enableMethod  = AccessTools.Method(_camDataType, "EnableFeature");
+                if (_disableMethod == null || _enableMethod == null) { Warn(); return; }
+
+                var pipelineType = AccessTools.TypeByName("Owlcat.Runtime.Visual.RenderPipeline.OwlcatRenderPipeline");
+                if (pipelineType == null) { Warn(); return; }
+
+                object asset = null;
+                var assetProp = AccessTools.Property(pipelineType, "Asset");
+                if (assetProp != null) { try { asset = assetProp.GetValue(null); } catch { } }
+                if (asset == null)
+                {
+                    var mgrType = AccessTools.TypeByName("UnityEngine.Rendering.RenderPipelineManager");
+                    var curProp = AccessTools.Property(mgrType, "currentPipeline");
+                    var pipeline = curProp?.GetValue(null);
+                    if (pipeline != null)
+                        asset = AccessTools.Property(pipeline.GetType(), "Asset")?.GetValue(pipeline);
+                }
+                if (asset == null) { Warn(); return; }
+
+                var rdProp = AccessTools.Property(asset.GetType(), "ScriptableRendererData");
+                if (rdProp == null) { Warn(); return; }
+                var rd = rdProp.GetValue(asset);
+                if (rd == null) { Warn(); return; }
+
+                System.Collections.IList features = (AccessTools.Field(rd.GetType(), "rendererFeatures")?.GetValue(rd)
+                    ?? AccessTools.Property(rd.GetType(), "rendererFeatures")?.GetValue(rd))
+                    as System.Collections.IList;
+                if (features == null) { Warn(); return; }
+
+                var featType = AccessTools.TypeByName("Owlcat.Runtime.Visual.RenderPipeline.RendererFeatures.OccludedObjectHighlighting.OccludedObjectHighlightingFeature");
+                if (featType == null) { Warn(); return; }
+
+                foreach (var f in features)
+                {
+                    if (f != null && f.GetType() == featType)
+                    {
+                        _wrathFeature = f;
+                        break;
+                    }
+                }
+                if (_wrathFeature == null) { Warn(); return; }
+            }
+            catch (Exception e) { Main.Log?.Error("Occluder.ResolveWrath failed: " + e); }
+        }
+
+        static void Warn()
+        {
+            if (!_warned) { _warned = true; Main.Log?.Error("Occluder (WotR): could not resolve - solid-walls toggle will do nothing."); }
+        }
+
+        // on == true  -> clip/feature runs (normal see-through dissolve)
+        // on == false -> clip/feature stopped (walls and doors stay solid)
         public static void SetGameClipEnabled(bool on)
         {
             Resolve();
-            if (_setEnabled == null) return;
-            try { _setEnabled.Invoke(null, new object[] { on }); }
-            catch (Exception e) { Main.Log?.Error("OccluderClip.SetGameClipEnabled failed: " + e); }
+            if (Compat.Ui == Compat.UiKind.WotR)
+            {
+                if (_wrathFeature == null || _disableMethod == null) return;
+                if (_cachedCam == null) _cachedCam = Camera.main;
+                if (_cachedCam == null) return;
+                var camData = _cachedCam.GetComponent(_camDataType);
+                if (camData == null) return;
+                var method = on ? _enableMethod : _disableMethod;
+                try { method.Invoke(camData, new[] { _wrathFeature }); }
+                catch (Exception e) { Main.Log?.Error("Occluder.SetGameClipEnabled (WotR) failed: " + e); }
+            }
+            else
+            {
+                if (_setEnabled == null) return;
+                try { _setEnabled.Invoke(null, new object[] { on }); }
+                catch (Exception e) { Main.Log?.Error("Occluder.SetGameClipEnabled (RT) failed: " + e); }
+            }
         }
     }
 
