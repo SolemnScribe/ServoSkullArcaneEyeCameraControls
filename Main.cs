@@ -71,7 +71,8 @@ namespace ServoSkullCameraControls
         public int ToggleKey   = (int)KeyCode.CapsLock;
         public int GamepadToggleKey = (int)KeyCode.JoystickButton4;   // gamepad view-toggle; defaults to the Xbox Left Bumper (LB). The D-pad reports as an axis, not a button, so Unity's input can't bind it here; rebindable to any pad button in settings
         public bool GamepadInvertPitch = false;  // invert the right-stick pitch on a pad. Off = stick up looks up; on flips it. Needs its own flag, not MouselookInvertY: the stick vector's Y sign is already opposite Unity's Mouse Y, so the same factor reads the other way round on a pad
-        public float GamepadDeadzone = 0.12f;    // thumbstick centre deadzone (both axes); applied before pitch-hold and yaw amplification
+        public float GamepadDeadzone = 0.12f;    // right-stick centre deadzone for the mod's own reads (pitch-hold, yaw takeover); the game's native input keeps its own calibration. Values above it are remapped to a smooth 0-1 so there's no response step at the edge
+        public float GamepadYawSpeedMult = 1f;   // right-stick turn-speed multiplier on a pad. At 1.0 the game's native turn is untouched; any other value has the mod take over stick-X yaw at (mult x GamepadYawRate) deg/s and suppress the native turn so the two don't stack. Contributed by @saghm (NexusMods/GitHub), reworked
 
         // Which targets the toggle key steps through, in the order View 1 -> View 2 -> Vanilla. A preset
         // is only included when it is also saved; Vanilla is the game's own camera (no preset). Defaults:
@@ -177,37 +178,33 @@ namespace ServoSkullCameraControls
         // so a missing member just yields null and we move on.
         static string DetectGameLocale()
         {
-            try
+            var lm = AccessTools.TypeByName("Kingmaker.Localization.LocalizationManager");
+            if (lm == null) return null;
+            var chains = new[]
             {
-                var lm = AccessTools.TypeByName("Kingmaker.Localization.LocalizationManager");
-                if (lm == null) return null;
-                var chains = new[]
+                new[] { "CurrentLocale" },
+                new[] { "CurrentPack", "Locale" },
+                new[] { "Instance", "CurrentPack", "Locale" },
+                new[] { "Instance", "CurrentLocale" },
+            };
+            foreach (var chain in chains)
+            {
+                try
                 {
-                    new[] { "CurrentLocale" },
-                    new[] { "CurrentPack", "Locale" },
-                    new[] { "Instance", "CurrentPack", "Locale" },
-                    new[] { "Instance", "CurrentLocale" },
-                };
-                foreach (var chain in chains)
-                {
-                    try
+                    var tr = Traverse.Create(lm);
+                    object val = null;
+                    foreach (var member in chain)
                     {
-                        var tr = Traverse.Create(lm);
-                        object val = null;
-                        foreach (var member in chain)
-                        {
-                            var step = tr.Property(member);
-                            val = step.GetValue();
-                            if (val == null) { step = tr.Field(member); val = step.GetValue(); }
-                            if (val == null) break;
-                            tr = Traverse.Create(val);
-                        }
-                        if (val != null) return val.ToString();
+                        var step = tr.Property(member);
+                        val = step.GetValue();
+                        if (val == null) { step = tr.Field(member); val = step.GetValue(); }
+                        if (val == null) break;
+                        tr = Traverse.Create(val);
                     }
-                    catch { }
+                    if (val != null) return val.ToString();
                 }
+                catch { }
             }
-            catch { }
             return null;
         }
 
@@ -260,6 +257,8 @@ namespace ServoSkullCameraControls
         // undisturbed on the subject, so it normally releases in a fraction of a second rather than running full
         // length. Area-to-area transitions never set _loadPending, so they are left alone.
         const int ApplyView1DelayFrames = 4;
+        const int ViewAssertStuckFrames = 3;       // on-load: seated pitch/zoom must survive this many consecutive frames to count as settled
+        const float ViewAssertMaxSeconds = 1.0f;   // on-load: hard cap on the View-1 re-assert hold
         const int DirectControlDelayFrames = 6;   // gamepad on-load direct-control flip: wait past the area load for the gameplay input layer (SurfaceMainInputLayer.Instance) to come up
         const int PostDialogReapplyFrames = 10;   // wait this many frames after a scripted-shot conversation ends, for the exit blend to settle, before re-stamping the active view (tunable)
         const float RecenterMaxSeconds = 0.8f;     // hard cap on the on-load recenter window
@@ -272,7 +271,22 @@ namespace ServoSkullCameraControls
         static int _postDialogReapply;
         static bool _recenterActive;
         static float _recenterElapsed, _recenterSettled;
-        internal static void NotifyGameLoad() { _loadPending = true; CameraRig_UpdateInternal_Patch.ClearFollower(); CutsceneCameraGate.Reset(); }
+        static bool _viewAssertActive;    // on-load: holding View 1's pitch/zoom until it sticks or you take control
+        static int  _viewAssertStuck;     // consecutive frames the seated pitch/zoom survived unchanged
+        static float _viewAssertElapsed;  // seconds the on-load hold has run (against the hard cap)
+        internal static void NotifyGameLoad()
+        {
+            _loadPending = true;
+            CameraRig_UpdateInternal_Patch.ClearFollower();
+            CutsceneCameraGate.Reset();
+            // Clear per-session statics that otherwise survive a return-to-main-menu, so a load after being in
+            // game starts as clean as a first load: the stale mouselook seat (it would drive a wrong pitch until
+            // the on-load re-assert lands) and the vanilla capture (re-grab this session's stock camera on the
+            // next ApplyView rather than keeping the previous session's). Also drop any in-flight on-load hold.
+            CameraRig_UpdateInternal_Patch.ResetMouselookSeat();
+            _vanillaCaptured = false;
+            _viewAssertActive = false;
+        }
         internal static void NotifyAreaDidLoad()
         {
             if (!_loadPending) return;
@@ -319,7 +333,9 @@ namespace ServoSkullCameraControls
         public const float NearClipMin = 0.1f, NearClipMax = 18f, NearClipStep = 0.1f;
         public const float FarClipMin = 50f, FarClipMax = 4000f, FarClipStep = 25f;   // provisional - calibrate FarClipMax to the game's logged baseline far
         public const float MouseSensMin = 0.2f, MouseSensMax = 10f, MouseSensStep = 0.1f;
-        public const float RotMultMin = 0.1f, RotMultMax = 8f, RotMultStep = 0.1f;
+        public const float RotMultMin = 0.1f, RotMultMax = 2f, RotMultStep = 0.05f;
+        public const float DeadzoneMin = 0f, DeadzoneMax = 0.5f, DeadzoneStep = 0.01f;
+        public const float GpYawMultMin = 0.1f, GpYawMultMax = 8f, GpYawMultStep = 0.1f;
         public const float FollowYawRate = 140f;   // deg/s the follow yaw may slew at when mult=1 (stock follow turn measured at ~131 deg/s); the per-view multiplier scales this down
         public const float PivotMin = 0f, PivotMax = 8f, PivotStep = 0.1f;
         public const float ShoulderMin = -8f, ShoulderMax = 8f, ShoulderStep = 0.1f;
@@ -329,8 +345,6 @@ namespace ServoSkullCameraControls
         public const float PivotScrollStep = 2.5f;   // Ctrl+scroll pivot-height change per notch
         public const float DollyScrollStep = 2.0f;   // Ctrl+Shift+scroll dolly change per notch
         public const float DialogHeightMin = 0f, DialogHeightMax = 4f;   // Full-tactical dialogue framing-height slider range (world-up raise)
-        public const float DeadzoneMin = 0f, DeadzoneMax = 0.5f, DeadzoneStep = 0.01f;
-
 
         static int _bindingTarget;   // 0 none; 1 set-view-1; 2 set-view-2; 3 toggle
         static int _activeView;      // 0 none/vanilla; 1; 2  (toggle state)
@@ -360,8 +374,8 @@ namespace ServoSkullCameraControls
         static float _gpPitch;
         static bool _gpPitchActive;
         public const float GamepadPitchRate = 90f;   // deg/sec at full stick, before the Y-sensitivity multiplier
-        public const float GamepadYawRate = 120f;    // deg/sec at full stick, before the per-view RotateSpeedMult
-        public const float GamepadZoomSpeed = 0.5f;  // scroll-position/sec (normalised 0-1) for D-pad zoom
+        public const float GamepadYawRate = 120f;    // deg/sec at full stick when the yaw takeover owns the turn, before GamepadYawSpeedMult
+        public const float GamepadZoomSpeed = 0.6f;   // zoom scroll-position/sec (0-1 scale) at full stick while R3 is held
 
         // Foreign-patch suppression bookkeeping
         static bool _suppressSettled;
@@ -389,25 +403,13 @@ namespace ServoSkullCameraControls
                 settings.PadFreeAimMigrated = true;
                 settings.Save(modEntry);
             }
-            try
-            {
-                Localization.Init(modEntry);   // pick the language file matching the game's current locale
-            }
-            catch (Exception eLoad) { Log?.Error("Load: Localization.Init threw: " + eLoad); }
-            try
-            {
-                Compat.Init();                 // detect RT vs WotR reflection targets (logs the UI flavour)
-            }
-            catch (Exception eLoad) { Log?.Error("Load: Compat.Init threw: " + eLoad); }
-            Log?.Log("Load: Compat.Ui=" + Compat.Ui);
+            try { Localization.Init(modEntry); }   // pick the language file matching the game's current locale
+            catch (Exception eLoc) { Log?.Error("Load: Localization.Init threw (continuing in English): " + eLoc); }
+            try { Compat.Init(); }                  // detect RT vs WotR reflection targets (logs the UI flavour)
+            catch (Exception eCompat) { Log?.Error("Load: Compat.Init threw: " + eCompat); }
 
-            try
-            {
-                HarmonyInst = new Harmony(modEntry.Info.Id);
-                HarmonyInst.PatchAll(Assembly.GetExecutingAssembly());
-                Log?.Log("Load: PatchAll succeeded");
-            }
-            catch (Exception e) { Log?.Error("Load: PatchAll threw: " + e); }
+            HarmonyInst = new Harmony(modEntry.Info.Id);
+            PatchAllResilient(HarmonyInst, Assembly.GetExecutingAssembly());
 
             modEntry.OnToggle = OnToggle;
             modEntry.OnUpdate = OnUpdate;
@@ -422,6 +424,32 @@ namespace ServoSkullCameraControls
                 crosshairGo.AddComponent<MouselookCrosshair>();
             }
             return true;
+        }
+
+        // Like Harmony.PatchAll, but patches each [HarmonyPatch] class in isolation so that one class whose
+        // Prepare/TargetMethod/Patch throws - e.g. a reflection lookup that turns ambiguous on some game
+        // version - is logged and skipped instead of aborting every remaining patch and failing the whole
+        // mod load. This is the same per-type CreateClassProcessor().Patch() that PatchAll runs internally,
+        // just wrapped per class. Targets that can't resolve are still expected to self-disable via their own
+        // Prepare() returning false; this only catches the harder failure where resolution itself throws.
+        static void PatchAllResilient(Harmony harmony, Assembly asm)
+        {
+            int applied = 0, skipped = 0;
+            foreach (var type in AccessTools.GetTypesFromAssembly(asm))
+            {
+                try
+                {
+                    var patched = harmony.CreateClassProcessor(type).Patch();
+                    if (patched != null && patched.Count > 0) applied++;
+                }
+                catch (Exception e)
+                {
+                    skipped++;
+                    Log?.Error("Patch class '" + type.FullName + "' could not be applied on this game version; skipping it (the rest of the mod still loads). " + e.Message);
+                }
+            }
+            if (skipped > 0)
+                Log?.Log("Harmony: " + applied + " patch class(es) applied, " + skipped + " skipped. See errors above for the skipped ones.");
         }
 
         static bool OnToggle(UnityModManager.ModEntry modEntry, bool value)
@@ -463,9 +491,31 @@ namespace ServoSkullCameraControls
                 _applyView1Countdown--;
                 if (_applyView1Countdown == 0 && settings.ApplyView1OnLoad && settings.View1.IsSet)
                 {
+                    _viewAssertActive = true; _viewAssertStuck = 0; _viewAssertElapsed = 0f;
                     ApplyView(settings.View1);
                     _activeView = 1;
-                    Log?.Log("Applied View 1 on game load.");
+                    Log?.Log("Applying View 1 on game load...");
+                }
+            }
+            else if (_viewAssertActive)
+            {
+                // Hold View 1's pitch/zoom against a still-settling save-load camera restore: re-seat each frame
+                // until the values survive unchanged for a few frames (the restore has finished) or you take
+                // control, rather than a single write a slow restore could overwrite. Mouselook takes over only
+                // once we stop, from the seat we just set. Self-logs the settle time for on-machine confirmation.
+                _viewAssertElapsed += Time.unscaledDeltaTime;
+                _viewAssertStuck = ViewSeatHeld(settings.View1) ? _viewAssertStuck + 1 : 0;
+                bool tookControl = CameraRig_UpdateInternal_Patch.FollowerActive();
+                if (_viewAssertStuck >= ViewAssertStuckFrames || tookControl || _viewAssertElapsed >= ViewAssertMaxSeconds)
+                {
+                    _viewAssertActive = false;
+                    string why = tookControl ? "took control" : (_viewAssertStuck >= ViewAssertStuckFrames ? "settled" : "cap");
+                    Log?.Log("View 1 seated on load after " + _viewAssertElapsed.ToString("0.00") + "s (" + why + ").");
+                }
+                else
+                {
+                    ApplyView(settings.View1);
+                    _activeView = 1;
                 }
             }
 
@@ -746,6 +796,28 @@ namespace ServoSkullCameraControls
             catch (Exception e) { Log?.Error("Applying view failed: " + e); }
         }
 
+        // True when the rig's pitch and zoom still match view v within tolerance - i.e. the on-load camera
+        // restore has stopped overwriting our seated values. Drives the on-load hold's "settled" exit. Reads the
+        // same fields ApplyView writes (m_TargetRotate pitch, the player scroll position); both games expose them.
+        static bool ViewSeatHeld(CameraView v)
+        {
+            if (CurrentRig == null || v == null) return false;
+            try
+            {
+                var t = Traverse.Create(CurrentRig);
+                Vector3 tr = t.Field("m_TargetRotate").GetValue<Vector3>();
+                if (Mathf.Abs(Mathf.DeltaAngle(tr.x, v.Pitch)) > 0.5f) return false;
+                var zoom = t.Property("CameraZoom").GetValue<object>();
+                if (zoom != null)
+                {
+                    float sp = Traverse.Create(zoom).Field("m_PlayerScrollPosition").GetValue<float>();
+                    if (Mathf.Abs(sp - v.Zoom) > 0.01f) return false;
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
         internal static void SetFloat(Traverse owner, string field, float val)
         {
             var f = owner.Field(field);
@@ -867,24 +939,113 @@ namespace ServoSkullCameraControls
             catch (Exception e) { Log?.Error("Zero rig pitch for cutscene failed: " + e); }
         }
 
+        // The user deadzone, applied to the mod's own stick reads only (the game's native input keeps its
+        // Rewired calibration). Above the deadzone the value is remapped (|v|-dz)/(1-dz) so the response
+        // rises smoothly from 0 at the deadzone edge to 1 at full deflection - no step, no hidden floor.
+        static float ApplyStickDeadzone(float v)
+        {
+            float dz = Mathf.Clamp(settings != null ? settings.GamepadDeadzone : 0.12f, DeadzoneMin, Mathf.Min(DeadzoneMax, 0.95f));
+            float a = Mathf.Abs(v);
+            if (a <= dz) return 0f;
+            return Mathf.Sign(v) * Mathf.Min(1f, (a - dz) / (1f - dz));
+        }
+
         // Current right-stick Y for pitch, or zero when the stick is centred. Rewired fires OnMoveRightStick
-        // only while the stick is deflected, so a stamp older than this frame means "centred"; a small deadzone
-        // guards against residual drift.
+        // only while the stick is deflected, so a stamp older than this frame means "centred"; the user
+        // deadzone guards against residual drift.
         internal static float GamepadPitchInput()
         {
             if (Time.frameCount - GpRightStickFrame > 1) return 0f;
-            float y = GpRightStickY;
-            float dz = settings?.GamepadDeadzone ?? 0.12f;
-            return Mathf.Abs(y) < dz ? 0f : y;
+            return ApplyStickDeadzone(GpRightStickY);
         }
 
-        // Current right-stick X for yaw, or zero when centred. Same staleness/deadzone as the pitch input.
+        // Current right-stick X for the yaw takeover, same staleness rule and deadzone as the pitch input.
         internal static float GamepadYawInput()
         {
             if (Time.frameCount - GpRightStickFrame > 1) return 0f;
-            float x = GpRightStickX;
-            float dz = settings?.GamepadDeadzone ?? 0.12f;
-            return Mathf.Abs(x) < dz ? 0f : x;
+            return ApplyStickDeadzone(GpRightStickX);
+        }
+
+        // The yaw takeover owns stick-X yaw whenever the multiplier is dialled off 1.0 and nothing scripted
+        // has the camera. Shared verbatim by the per-frame tick (applies the turn) and the input-capture
+        // prefix (zeroes the vector's X so the game's native turn doesn't stack on top) - the two must agree
+        // or a frame of double-turn slips through. Stick-Y is never touched: View 2 keeps its native zoom,
+        // and View 1's zoom is pinned by the pitch-hold anyway.
+        internal static bool GamepadYawTakeoverActive()
+        {
+            if (!Active || settings == null || _activeView == 0) return false;
+            if (Mathf.Abs(settings.GamepadYawSpeedMult - 1f) < 0.01f) return false;   // at 1.0 the native turn is untouched
+            if (!CameraRig_UpdateInternal_Patch.InGamepadMode()) return false;
+            if (CameraRig_UpdateInternal_Patch.LastHardBind
+                || CameraRig_UpdateInternal_Patch.InCutscene()
+                || CameraRig_UpdateInternal_Patch.InDialogMode()
+                || CameraRig_UpdateInternal_Patch.InMapMode()
+                || CutsceneCameraGate.CameraCutsceneActive()) return false;
+            return true;
+        }
+
+        // View 1 on a pad owns the right stick (pitch-hold, yaw takeover, R3 zoom), so the game's R3
+        // rotate/pan mode toggle is suppressed there: without this, every R3 zoom chord would also flip the
+        // player into camera-panning mode. Used by the toggle-skip prefix below and by the pitch-hold, which
+        // additionally HOLDS Player.IsCameraRotateMode true each frame so entering View 1 from pan mode lands
+        // in rotate mode. Both games carry the identical Kingmaker.Player.IsCameraRotateMode field.
+        internal static bool SuppressPanModeToggle()
+        {
+            return Active && settings != null && _activeView == 1
+                && settings.View1 != null && settings.View1.IsSet
+                && CameraRig_UpdateInternal_Patch.InGamepadMode();
+        }
+
+        static bool _playerFieldResolved;
+        static System.Reflection.PropertyInfo _playerProp;
+        static System.Reflection.FieldInfo _rotateModeField;
+
+        internal static void HoldCameraRotateMode()
+        {
+            try
+            {
+                if (!CameraRig_UpdateInternal_Patch.TryGetGame(out object game)) return;
+                if (!_playerFieldResolved)
+                {
+                    _playerFieldResolved = true;
+                    _playerProp = AccessTools.Property(game.GetType(), "Player");
+                    var pType = _playerProp?.PropertyType ?? AccessTools.TypeByName("Kingmaker.Player");
+                    if (pType != null) _rotateModeField = AccessTools.Field(pType, "IsCameraRotateMode");
+                }
+                object player = _playerProp?.GetValue(game, null);
+                if (player == null || _rotateModeField == null) return;
+                if (!(bool)_rotateModeField.GetValue(player))
+                    _rotateModeField.SetValue(player, true);   // View 1 owns the stick; keep the rig in rotate mode
+            }
+            catch { }
+        }
+
+        // Applies the taken-over yaw: the stick turns the camera at GamepadYawRate x GamepadYawSpeedMult
+        // deg/s. Writes the transform yaw and m_TargetRotate.y together - the same pattern mouselook uses -
+        // so the rig's rubber-band doesn't slerp the turn back. Native rotation is suppressed at the source
+        // (the capture prefix zeroes stick X) while the takeover is active. Contributed by @saghm, reworked:
+        // separate multiplier (View 1 ships RotateSpeedMult at 0.1 as a keyboard strafing tool, so reusing it
+        // crawled), X-only suppression via the argument (WotR's input layer is static and has no
+        // m_RightStickVector field, so the original instance-field approach silently no-opped there).
+        internal static void TickGamepadYawTakeover(bool hardBind)
+        {
+            if (hardBind || CurrentRig == null || !GamepadYawTakeoverActive()) return;
+            float dx = GamepadYawInput() * GamepadYawRate * Time.unscaledDeltaTime
+                       * Mathf.Clamp(settings.GamepadYawSpeedMult, GpYawMultMin, GpYawMultMax);
+            if (Mathf.Approximately(dx, 0f)) return;
+            try
+            {
+                var rig = CurrentRig as Component;
+                if (rig == null) return;
+                Vector3 e = rig.transform.eulerAngles;
+                float newYaw = e.y + dx;
+                rig.transform.rotation = Quaternion.Euler(e.x, newYaw, e.z);
+                var trf = Traverse.Create(rig).Field("m_TargetRotate");
+                Vector3 tr = trf.GetValue<Vector3>();
+                tr.y = newYaw;
+                trf.SetValue(tr);
+            }
+            catch (Exception e2) { Log?.Error("Gamepad yaw takeover failed: " + e2); }
         }
 
         // The pitch-hold runs only for View 1 on a pad with a set view.
@@ -915,6 +1076,7 @@ namespace ServoSkullCameraControls
             }
             try
             {
+                HoldCameraRotateMode();   // View 1 owns the stick: keep the game's R3 rotate/pan flag in rotate mode
                 var t = Traverse.Create(CurrentRig);
                 var trf = t.Field("m_TargetRotate");
                 Vector3 tr = trf.GetValue<Vector3>();
@@ -923,13 +1085,22 @@ namespace ServoSkullCameraControls
                     _gpPitch = tr.x;          // seat on the current pitch (the freshly-applied view) - no snap
                     _gpPitchActive = true;
                 }
+                else if (UnityEngine.Input.GetKey(KeyCode.JoystickButton9))
+                {
+                    // R3 held: the stick's up/down becomes zoom for as long as the click is held (View 1 has no
+                    // native stick zoom - the pitch-hold owns Y). Adjusts the view's SAVED zoom, which the pin
+                    // below applies this same frame, so the panel slider and the stick stay one value. The pitch
+                    // holds still while zooming. R3 is a real pad button (unlike the D-pad, which reports as an
+                    // axis and can't be read as a key), so this needs no per-game input-action IDs.
+                    // Feature suggested by @saghm (their R3+D-pad variant needed unverifiable Rewired action IDs).
+                    float dzoom = GamepadPitchInput() * GamepadZoomSpeed * Time.unscaledDeltaTime;
+                    settings.View1.Zoom = Mathf.Clamp(settings.View1.Zoom + dzoom, ViewZoomMin, ViewZoomMax);
+                }
                 else
                 {
                     float sensY = Mathf.Max(0.01f, settings.MouselookSensY);
-                    float mult = ActiveViewRotMult();
                     float dy = GamepadPitchInput() * sensY * GamepadPitchRate * Time.unscaledDeltaTime
-                               * mult
-                               * (settings.GamepadInvertPitch ? -1f : 1f);
+                               * (settings.GamepadInvertPitch ? -1f : 1f);   // off keeps the tuned default (+1 = stick up looks up, given the stick's Y sign); on inverts
                     float loP = MouselookPitchMin;
                     float hiP = Mathf.Clamp(settings.MaxPitchAngle, PitchHardMin, PitchHardMax);
                     if (hiP < loP) { float tmp = loP; loP = hiP; hiP = tmp; }
@@ -952,167 +1123,6 @@ namespace ServoSkullCameraControls
             }
             catch (Exception e) { Log?.Error("Gamepad pitch-hold failed: " + e); }
         }
-
-        static bool _rightStickDeadzoneRemoved;
-
-        // Zero Rewired's calibration deadzone on the right-stick physical axes (2 = RX, 3 = RY) so raw evdev
-        // values from rest to full deflection all reach the OnMoveRightStick callback, not just the segment
-        // past ~0.13. Called once from the first TickGamepadYawMult frame. Rewired's AxisCalibration.deadZone
-        // clamps sub-deadzone raw input before the sensitivity curve; zeroing it gives us a linear 0-1 response
-        // with no hidden floor.
-        internal static void RemoveRightStickDeadzone()
-        {
-            if (_rightStickDeadzoneRemoved) return;
-            try
-            {
-                var reInputType = AccessTools.TypeByName("Rewired.ReInput");
-                if (reInputType == null) return;
-                var controllers = reInputType.GetProperty("controllers", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-                if (controllers == null) return;
-                var joysticks = controllers.GetType().GetProperty("Joysticks")?.GetValue(controllers) as System.Collections.IList;
-                if (joysticks == null || joysticks.Count == 0) return;
-                foreach (var j in joysticks)
-                {
-                    var calMap = j.GetType().GetProperty("calibrationMap")?.GetValue(j);
-                    if (calMap == null) continue;
-                    var getAxis = calMap.GetType().GetMethod("GetAxisCalibrations");
-                    var axes = getAxis?.Invoke(calMap, null) as System.Collections.IList;
-                    if (axes == null) continue;
-                    foreach (var axis in axes)
-                    {
-                        var tAxis = Traverse.Create(axis);
-                        int idx = tAxis.Field("index").GetValue<int>();
-                        if (idx == 2 || idx == 3)
-                            tAxis.Field("deadZone").SetValue(0f);
-                    }
-                }
-            }
-            catch { }
-            _rightStickDeadzoneRemoved = true;
-        }
-
-        // Gamepad yaw-speed multiplier (reuses every view's existing RotateSpeedMult). Reads the stick X directly
-        // and adds extra rotation to the camera transform, so it doesn't fight the follower's target. Stands down
-        // during the same gates as the pitch hold.
-        internal static void TickGamepadYawMult()
-        {
-            if (CameraRig_UpdateInternal_Patch.InGamepadMode())
-                RemoveRightStickDeadzone();   // one-shot: strip Rewired's calibration deadzone off the right stick
-            if (!CameraRig_UpdateInternal_Patch.InGamepadMode()
-                || _activeView == 0
-                || CameraRig_UpdateInternal_Patch.InCutscene()
-                || CameraRig_UpdateInternal_Patch.InDialogMode()
-                || CameraRig_UpdateInternal_Patch.InMapMode())
-            {
-                return;
-            }
-            float mult = ActiveViewRotMult();
-            float sensY = Mathf.Max(0.01f, settings.MouselookSensY);
-            float dx = GamepadYawInput() * sensY * GamepadPitchRate * Time.unscaledDeltaTime * mult;
-            if (Mathf.Approximately(dx, 0f)) return;
-            var rig = CurrentRig as Component;
-            if (rig == null) return;
-            Vector3 e = rig.transform.eulerAngles;
-            float newYaw = e.y + dx;
-            rig.transform.rotation = Quaternion.Euler(e.x, newYaw, e.z);
-            try
-            {
-                var t = Traverse.Create(rig);
-                var trf = t.Field("m_TargetRotate");
-                Vector3 tr = trf.GetValue<Vector3>();
-                tr.y = newYaw;
-                trf.SetValue(tr);
-            }
-            catch { }
-        }
-
-        // ---- Gamepad zoom: hold R3 (Rewired action 19) + D-pad up/down (actions 6/7) -------------------------
-        static bool _zpInit;
-        static object _zpPlayer;
-        static System.Reflection.MethodInfo _zpGetButton;
-
-        static void InitZoomReflection()
-        {
-            if (_zpInit) return;
-            _zpInit = true;
-            try
-            {
-                var reInputType = AccessTools.TypeByName("Rewired.ReInput");
-                if (reInputType == null) return;
-                var playersProp = reInputType.GetProperty("players", BindingFlags.Public | BindingFlags.Static);
-                if (playersProp == null) return;
-                var players = playersProp?.GetValue(null);
-                if (players == null) return;
-                var pType = players.GetType();
-                var getPlayer = pType.GetMethod("GetPlayer", new[] { typeof(int) });
-                if (getPlayer != null)
-                    _zpPlayer = getPlayer.Invoke(players, new object[] { 0 });
-                if (_zpPlayer == null)
-                {
-                    var pp = pType.GetProperty("Players");
-                    if (pp != null)
-                    {
-                        var list = pp.GetValue(players);
-                        if (list != null)
-                        {
-                            var liType = list.GetType();
-                            var idxPi = liType.GetProperty("Item", new[] { typeof(int) });
-                            var idxMi = idxPi != null ? null : liType.GetMethod("get_Item", new[] { typeof(int) });
-                            if (idxPi != null)
-                                _zpPlayer = idxPi.GetValue(list, new object[] { 0 });
-                            else if (idxMi != null)
-                                _zpPlayer = idxMi.Invoke(list, new object[] { 0 });
-                        }
-                    }
-                }
-                if (_zpPlayer == null) return;
-                _zpGetButton = _zpPlayer.GetType().GetMethod("GetButton", new[] { typeof(int) });
-            }
-            catch { }
-        }
-
-        internal static void TickGamepadZoom()
-        {
-            if (!_zpInit) InitZoomReflection();
-            if (_zpPlayer == null || _zpGetButton == null) return;
-            if (!CameraRig_UpdateInternal_Patch.InGamepadMode() || CurrentRig == null) return;
-
-            bool r3Held;
-            try { r3Held = (bool)_zpGetButton.Invoke(_zpPlayer, new object[] { 19 }); }
-            catch { return; }
-            if (!r3Held) return;
-
-            float zoomDelta = 0f;
-            try
-            {
-                bool dpadUp = (bool)_zpGetButton.Invoke(_zpPlayer, new object[] { 6 });
-                bool dpadDown = (bool)_zpGetButton.Invoke(_zpPlayer, new object[] { 7 });
-                if (dpadUp) zoomDelta += GamepadZoomSpeed * Time.unscaledDeltaTime;
-                if (dpadDown) zoomDelta -= GamepadZoomSpeed * Time.unscaledDeltaTime;
-            }
-            catch { return; }
-
-            if (zoomDelta != 0f)
-            {
-                try
-                {
-                    var camZoom = Traverse.Create(CurrentRig).Property("CameraZoom").GetValue<object>();
-                    if (camZoom != null)
-                    {
-                        var tz = Traverse.Create(camZoom);
-                        float cur = tz.Field("m_PlayerScrollPosition").GetValue<float>();
-                        cur = Mathf.Clamp01(cur + zoomDelta);
-                        settings.View1.Zoom = cur;   // keep pitch-hold's pin in sync
-                        tz.Field("m_PlayerScrollPosition").SetValue(cur);
-                        tz.Field("m_ScrollPosition").SetValue(cur);
-                        tz.Field("m_SmoothScrollPosition").SetValue(cur);
-                    }
-                }
-                catch { }
-            }
-        }
-
-
 
         // ---- Gamepad on-load direct character control (the L3 "Character control" toggle) -----------------
         // The gameplay input layer carries a CursorEnabled flag (on Owlcat's GamepadInput.InputLayer base):
@@ -1326,9 +1336,15 @@ namespace ServoSkullCameraControls
             GUILayout.Label("     " + L("\u2013 the toggle key steps through the ticked targets in order; Vanilla is the game's own camera."));
             settings.GamepadInvertPitch = GUILayout.Toggle(settings.GamepadInvertPitch, "     " + L("Invert gamepad pitch  \u2013 flip the right-stick up/down look direction (View 1 on a pad)"));
             GUILayout.BeginHorizontal();
-            GUILayout.Label("     " + L("gamepad deadzone: ") + settings.GamepadDeadzone.ToString("0.00"), GUILayout.Width(250f));
+            GUILayout.Label("     " + L("gamepad deadzone: ") + settings.GamepadDeadzone.ToString("0.00"), GUILayout.Width(185f));
             settings.GamepadDeadzone = Snap(GUILayout.HorizontalSlider(settings.GamepadDeadzone, DeadzoneMin, DeadzoneMax, GUILayout.Width(235f)), DeadzoneStep);
             GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("     " + L("gamepad turn speed: ") + settings.GamepadYawSpeedMult.ToString("0.0") + "\u00d7", GUILayout.Width(185f));
+            settings.GamepadYawSpeedMult = Snap(GUILayout.HorizontalSlider(settings.GamepadYawSpeedMult, GpYawMultMin, GpYawMultMax, GUILayout.Width(235f)), GpYawMultStep);
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     " + L("\u2013 1.0\u00d7 leaves the game's own turn untouched; other values replace it with a proportional turn"));
+            GUILayout.Label("     " + L("\u2013 hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)"));
             settings.DirectControlOnGamepadLoad = GUILayout.Toggle(settings.DirectControlOnGamepadLoad, "     " + L("Direct character control on gamepad load  \u2013 the left stick moves your character (click the stick to toggle)"));
             settings.ApplyView1OnLoad = GUILayout.Toggle(settings.ApplyView1OnLoad, "  " + L("Apply View 1 on game load (area-to-area transitions keep the current camera)"));
 
@@ -1544,10 +1560,11 @@ namespace ServoSkullCameraControls
 
         static float Snap(float value, float step) => Mathf.Round(value / step) * step;
 
-        // Per-view rotation multiplier (keyboard follow-yaw slowdown + gamepad yaw amplification) for whichever preset is currently active (1 if none).
+        // Per-view keyboard-rotation multiplier for whichever preset is currently active (1 if none).
         internal static float ActiveViewRotMult()
         {
             if (settings == null) return 1f;
+            if (CameraRig_UpdateInternal_Patch.InGamepadMode()) return 1f;   // stick turns at stock speed; the slow-down is a keyboard-strafing tool
             if (_activeView == 1) return Mathf.Clamp(settings.View1.RotateSpeedMult, RotMultMin, RotMultMax);
             if (_activeView == 2) return Mathf.Clamp(settings.View2.RotateSpeedMult, RotMultMin, RotMultMax);
             return 1f;
@@ -1640,12 +1657,22 @@ namespace ServoSkullCameraControls
         // restore it if the mod is disabled mid-view.
         static bool _occluderSuppressed;
 
-        static void UpdateOccluderClip()
+        // The active view wants solid walls, minus the standdowns shared by both games' suppression paths:
+        // hands off on the map, during hard-bound shots, and during in-dialogue scripted camera shots.
+        // Used by RT's occluder-clip hold below and by WotR's feature-flag postfix (OccludedHighlight patch).
+        internal static bool SolidWallsWanted()
         {
             bool want = ActiveViewObj()?.SolidWalls ?? false;
             if (CameraRig_UpdateInternal_Patch.InMapMode()) want = false;             // hands off on the system/sector map
             if (CameraRig_UpdateInternal_Patch.LastHardBind) want = false;            // hand back during hard-bound shots (scripted cinematics)
             if (CutsceneCameraGate.CameraCutsceneActive()) want = false;              // hand back during in-dialogue scripted camera shots
+            return want;
+        }
+
+        static void UpdateOccluderClip()
+        {
+            if (Compat.Ui == Compat.UiKind.WotR) return;   // WotR suppression is the OccludedHighlight feature-flag postfix, not RT's clip service
+            bool want = SolidWallsWanted();
             if (want) { OccluderClip.SetGameClipEnabled(false); _occluderSuppressed = true; }
             else if (_occluderSuppressed) { OccluderClip.SetGameClipEnabled(true); _occluderSuppressed = false; }
         }
@@ -1756,6 +1783,8 @@ namespace ServoSkullCameraControls
     {
         static float _baseNear, _baseFar;
         static bool _captured, _customActive, _triedFields, _loggedBase;
+        static bool _wotrNearOn;        // WotR: is a near-clip view live this frame (set in Apply/Restore, read by the StaticPreRender transpiler)
+        static float _wotrNear = 1f;    // WotR: the near value to pin when _wotrNearOn
         static FieldInfo _fLens, _fNcp, _fFcp;
 
         static object GetZoom(object rig) => Traverse.Create(rig).Property("CameraZoom").GetValue<object>();
@@ -1812,6 +1841,7 @@ namespace ServoSkullCameraControls
             Capture(vcam, cam);
             float n = nearOn ? Mathf.Clamp(nearVal, Main.NearClipMin, Main.NearClipMax) : _baseNear;
             float f = farOn ? Mathf.Clamp(farVal, Main.FarClipMin, Main.FarClipMax) : _baseFar;
+            _wotrNearOn = nearOn; _wotrNear = n;   // WotR near lever: the StaticPreRender transpiler reads this (RT ignores it)
             if (vcam != null) WriteVcam(vcam, n, f);
             if (cam != null) { cam.nearClipPlane = n; cam.farClipPlane = f; }
             _customActive = true;
@@ -1827,118 +1857,136 @@ namespace ServoSkullCameraControls
             if (vcam != null) WriteVcam(vcam, _baseNear, _baseFar);
             if (cam != null) { cam.nearClipPlane = _baseNear; cam.farClipPlane = _baseFar; }
             _customActive = false;
+            _wotrNearOn = false;
+        }
+
+        // Called only from the WotR StaticPreRender transpiler below (RT keeps the game's own near via its
+        // Cinemachine lens, so it never calls this). Returns the active view's near when a near-clip view is
+        // live this frame - decided by Apply/Restore in the per-frame postfix, which runs before pre-render -
+        // else the game's own default, so it is vanilla-identical when no near-clip view is active.
+        public static float WotRNearPin(float gameDefault) => _wotrNearOn ? _wotrNear : gameDefault;
+    }
+
+    // WotR near clip. WotR's CameraZoom has no Cinemachine virtual camera (the lever RT's near clip rides),
+    // so the only near lever is the Unity camera's nearClipPlane - which Kingmaker.Visual.RenderingManager
+    // .StaticPreRender hard-pins to a constant 1.0 each pre-render frame and then feeds into depth
+    // reconstruction and screen-space reflections. A direct camera write from our postfix loses to that pin,
+    // and a postfix on StaticPreRender would win the render near but desync reconstruction/SSR (both read the
+    // near live, within StaticPreRender, before our postfix could run). So we transpile the pinned value
+    // itself: replace the constant that StaticPreRender pushes into Camera.set_nearClipPlane with our
+    // provider, setting near BEFORE the reconstruction/SSR reads so the whole depth pipeline stays consistent
+    // at our value. RT-gated out (its near rides the vcam lens; its StaticPreRender pin is not the lever),
+    // leaving RT byte-identical.
+    [HarmonyPatch]
+    static class RenderingManager_StaticPreRender_WotRNearPatch
+    {
+        static bool Prepare() => Compat.Ui == Compat.UiKind.WotR
+            && AccessTools.Method("Kingmaker.Visual.RenderingManager:StaticPreRender") != null;
+
+        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.Visual.RenderingManager:StaticPreRender");
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+        {
+            var codes = new List<CodeInstruction>(instructions);
+            var setNear = AccessTools.Method("UnityEngine.Camera:set_nearClipPlane");
+            var pin = AccessTools.Method(typeof(ClipPlane), "WotRNearPin");
+            if (setNear != null && pin != null)
+            {
+                for (int i = 0; i < codes.Count; i++)
+                {
+                    var op = codes[i].opcode;
+                    if ((op == System.Reflection.Emit.OpCodes.Callvirt || op == System.Reflection.Emit.OpCodes.Call)
+                        && setNear.Equals(codes[i].operand))
+                    {
+                        // Stack here is [camera, near]; our static float(float) consumes the near and pushes
+                        // ours, leaving [camera, near'] for the setter. Insert before the setter so the value
+                        // is in place for the reconstruction/SSR reads that follow in the same method.
+                        codes.Insert(i, new CodeInstruction(System.Reflection.Emit.OpCodes.Call, pin));
+                        Main.Log?.Log("Clip: WotR near-pin transpiler applied to StaticPreRender - near clip is now live on Wrath.");
+                        return codes;
+                    }
+                }
+            }
+            Main.Log?.Error("Clip: WotR near-pin transpiler did not find Camera.set_nearClipPlane in StaticPreRender - near clip stays at the game default on WotR.");
+            return codes;
         }
     }
 
-    // Toggles the game's wall/geometry dissolve so doors and walls in front of the camera stay solid.
-    // On RT:  Owlcat.Runtime.Visual.OcclusionGeometryClip.System.SetEnabled stops/starts the clip service.
-    // On WotR: we call OwlcatAdditionalCameraData.DisableFeature/EnableFeature on the main camera for
-    //          the OccludedObjectHighlightingFeature instance, matching the game's own cutscene code
-    //          in DirectorCameraLink. Re-asserted each frame because area loads restart the service.
+    // Toggles RT's occluder see-through - the render-pipeline service that dissolves walls and doors
+    // between the camera and your party so you can see units behind cover. Disabling it leaves that
+    // geometry solid. The lever is the static Owlcat.Runtime.Visual.OcclusionGeometryClip.System.SetEnabled,
+    // which stops/starts the whole clip service; it no-ops when the value is unchanged, so re-asserting it
+    // each frame is cheap. Resolved by reflection so the mod needs no reference to the visual assembly.
     static class OccluderClip
     {
-        // RT path
         static MethodInfo _setEnabled;
-        // WotR path
-        static object _wrathFeature;
-        static Type _camDataType;
-        static MethodInfo _disableMethod, _enableMethod;
-        static Camera _cachedCam;
         static bool _resolved, _warned;
 
         static void Resolve()
         {
             if (_resolved) return;
             _resolved = true;
-            if (Compat.Ui == Compat.UiKind.WotR) ResolveWrath();
-            else ResolveRT();
-        }
-
-        static void ResolveRT()
-        {
             var t = AccessTools.TypeByName("Owlcat.Runtime.Visual.OcclusionGeometryClip.System");
             if (t != null) _setEnabled = AccessTools.Method(t, "SetEnabled", new[] { typeof(bool) });
-        }
-
-        static void ResolveWrath()
-        {
-            try
+            if (_setEnabled == null && !_warned)
             {
-                _camDataType = AccessTools.TypeByName("Owlcat.Runtime.Visual.RenderPipeline.OwlcatAdditionalCameraData");
-                if (_camDataType == null) { Warn(); return; }
-                _disableMethod = AccessTools.Method(_camDataType, "DisableFeature");
-                _enableMethod  = AccessTools.Method(_camDataType, "EnableFeature");
-                if (_disableMethod == null || _enableMethod == null) { Warn(); return; }
-
-                var pipelineType = AccessTools.TypeByName("Owlcat.Runtime.Visual.RenderPipeline.OwlcatRenderPipeline");
-                if (pipelineType == null) { Warn(); return; }
-
-                object asset = null;
-                var assetProp = AccessTools.Property(pipelineType, "Asset");
-                if (assetProp != null) { try { asset = assetProp.GetValue(null); } catch { } }
-                if (asset == null)
-                {
-                    var mgrType = AccessTools.TypeByName("UnityEngine.Rendering.RenderPipelineManager");
-                    var curProp = AccessTools.Property(mgrType, "currentPipeline");
-                    var pipeline = curProp?.GetValue(null);
-                    if (pipeline != null)
-                        asset = AccessTools.Property(pipeline.GetType(), "Asset")?.GetValue(pipeline);
-                }
-                if (asset == null) { Warn(); return; }
-
-                var rdProp = AccessTools.Property(asset.GetType(), "ScriptableRendererData");
-                if (rdProp == null) { Warn(); return; }
-                var rd = rdProp.GetValue(asset);
-                if (rd == null) { Warn(); return; }
-
-                System.Collections.IList features = (AccessTools.Field(rd.GetType(), "rendererFeatures")?.GetValue(rd)
-                    ?? AccessTools.Property(rd.GetType(), "rendererFeatures")?.GetValue(rd))
-                    as System.Collections.IList;
-                if (features == null) { Warn(); return; }
-
-                var featType = AccessTools.TypeByName("Owlcat.Runtime.Visual.RenderPipeline.RendererFeatures.OccludedObjectHighlighting.OccludedObjectHighlightingFeature");
-                if (featType == null) { Warn(); return; }
-
-                foreach (var f in features)
-                {
-                    if (f != null && f.GetType() == featType)
-                    {
-                        _wrathFeature = f;
-                        break;
-                    }
-                }
-                if (_wrathFeature == null) { Warn(); return; }
+                _warned = true;
+                Main.Log?.Error("OccluderClip: OcclusionGeometryClip.System.SetEnabled not found - the solid-walls toggle will do nothing.");
             }
-            catch (Exception e) { Main.Log?.Error("Occluder.ResolveWrath failed: " + e); }
         }
 
-        static void Warn()
-        {
-            if (!_warned) { _warned = true; Main.Log?.Error("Occluder (WotR): could not resolve - solid-walls toggle will do nothing."); }
-        }
-
-        // on == true  -> clip/feature runs (normal see-through dissolve)
-        // on == false -> clip/feature stopped (walls and doors stay solid)
+        // on == true  -> the game's clip service runs (normal see-through)
+        // on == false -> service stopped (walls and doors stay solid)
         public static void SetGameClipEnabled(bool on)
         {
             Resolve();
-            if (Compat.Ui == Compat.UiKind.WotR)
+            if (_setEnabled == null) return;
+            try { _setEnabled.Invoke(null, new object[] { on }); }
+            catch (Exception e) { Main.Log?.Error("OccluderClip.SetGameClipEnabled failed: " + e); }
+        }
+    }
+
+    // ===== WotR: solid walls = suppress the OccludedObjectHighlighting feature. =====
+    // WotR has no OcclusionGeometryClip service; its camera see-through is the SRP's
+    // OccludedObjectHighlighting renderer feature - a depth-clip pass that NOISE-DISSOLVES geometry
+    // sitting in front of per-unit clipper blobs (and geometry within NearCameraClipDistance of the
+    // camera), plus a silhouette highlight for the occluded units. This is what eats wagons/market
+    // stands on a low, dollied-in view: at shoulder height, scenery lines up in front of units far more
+    // often than from the vanilla high camera, and the dissolve is distance/position-driven (empirically
+    // rotation-insensitive - the blob positions depend on camera POSITION only). WOTR_COMPAT §2's
+    // "highlighting, not dissolve - nothing to suppress" was wrong.
+    // The engine gates the whole feature in-shader on one global float, _OccludedObjectHighlightingFeatureEnabled:
+    // AddRenderPasses sets it to 1 every frame it runs (and its own non-game-camera path sets 0 via
+    // DisableFeature), so a 0 is a fully supported off state - no pass skipping, no stale render targets.
+    // This postfix lands after the game's 1-write each frame and forces 0 while the active view wants
+    // solid walls; the moment it stops (toggle off, cutscene standdown, mod disabled) the game's own
+    // per-frame write restores the feature - self-healing, no restore path needed.
+    // Trade-off, deliberate: while suppressed the occluded-unit SILHOUETTES are off too (one flag gates
+    // the whole feature in-shader).
+    [HarmonyPatch]
+    static class OccludedHighlight_SolidWalls_WotRPatch
+    {
+        static MethodBase TargetMethod() => AccessTools.Method(
+            "Owlcat.Runtime.Visual.RenderPipeline.RendererFeatures.OccludedObjectHighlighting.OccludedObjectHighlightingFeature:AddRenderPasses");
+
+        static bool Prepare() => Compat.Ui == Compat.UiKind.WotR && TargetMethod() != null;
+
+        static bool _logged;
+
+        static void Postfix()
+        {
+            try
             {
-                if (_wrathFeature == null || _disableMethod == null) return;
-                if (_cachedCam == null) _cachedCam = Camera.main;
-                if (_cachedCam == null) return;
-                var camData = _cachedCam.GetComponent(_camDataType);
-                if (camData == null) return;
-                var method = on ? _enableMethod : _disableMethod;
-                try { method.Invoke(camData, new[] { _wrathFeature }); }
-                catch (Exception e) { Main.Log?.Error("Occluder.SetGameClipEnabled (WotR) failed: " + e); }
+                if (!Main.Active || Main.settings == null) return;
+                if (!Main.SolidWallsWanted()) return;
+                Shader.SetGlobalFloat("_OccludedObjectHighlightingFeatureEnabled", 0f);
+                if (!_logged)
+                {
+                    _logged = true;
+                    Main.Log?.Log("SolidWalls (WotR): suppressing the occluded-object dissolve/highlight feature while this view is active.");
+                }
             }
-            else
-            {
-                if (_setEnabled == null) return;
-                try { _setEnabled.Invoke(null, new object[] { on }); }
-                catch (Exception e) { Main.Log?.Error("Occluder.SetGameClipEnabled (RT) failed: " + e); }
-            }
+            catch { }   // never let a render-setup hook throw into the pipeline
         }
     }
 
@@ -2033,7 +2081,7 @@ namespace ServoSkullCameraControls
         internal static bool FollowerActive() => TryGetLiveSubjectPos(out _);
 
         // Resolve the Game singleton once, then reuse it for the player/selection lookups below.
-        static bool TryGetGame(out object game)
+        internal static bool TryGetGame(out object game)
         {
             game = null;
             if (!_gameInstResolved)
@@ -2321,8 +2369,7 @@ namespace ServoSkullCameraControls
                 // and pin zoom here. Because it re-asserts pitch+zoom every frame, this also doubles as the
                 // backstop that holds the view across dialogue/area transitions (no mouselook to carry it on a pad).
                 Main.TickGamepadPitchHold(hardBind);
-                Main.TickGamepadYawMult();   // amplifies right-stick yaw (any view) via RotateSpeedMult
-                Main.TickGamepadZoom();      // hold R3 + D-pad up/down for zoom
+                Main.TickGamepadYawTakeover(hardBind);   // right-stick turn-speed multiplier (all views); inert at 1.0
 
                 // Follow-yaw slew limiter. The A/D turn is the follower ramping m_TargetRotate.y toward the
                 // character facing (measured ~131 deg/s), with the rig's rubber-band tracking it ~3 deg behind;
@@ -2342,7 +2389,7 @@ namespace ServoSkullCameraControls
                     float rotMult = Main.ActiveViewRotMult();
                     bool byMouse = false;
                     try { byMouse = t.Field("m_RotationByMouse").GetValue<bool>(); } catch { }
-                    bool slew = rotMult < 0.99f && !byMouse && !hardBind && !Main.MouselookEngaged() && !InCutscene() && !InGamepadMode();
+                    bool slew = rotMult < 0.99f && !byMouse && !hardBind && !Main.MouselookEngaged() && !InCutscene();
 
                     if (slew)
                     {
@@ -2705,6 +2752,36 @@ namespace ServoSkullCameraControls
     {
         internal enum UiKind { Unknown, RT, WotR }
         internal static UiKind Ui = UiKind.Unknown;
+
+        // CommandControlCamera.OnRun has version-dependent overloads. WotR's CommandBase declares BOTH
+        // OnRun(player, skipping) and OnRun(player, track, skipping); on some game builds CommandControlCamera
+        // overrides both, on others only the two-arg form. A bare AccessTools.Method("...:OnRun") does a
+        // name-only reflection lookup that throws AmbiguousMatchException the moment two overloads are visible
+        // on the type - and because that threw inside a Harmony Prepare(), it aborted the ENTIRE PatchAll and
+        // the mod failed to load (reported on Wrath). Resolve the intended lifecycle entry - the
+        // (CutscenePlayerData player, bool skipping) form the mod has always gated on - deterministically by
+        // enumeration, derived type first then base, so overload count never matters.
+        internal static MethodBase ResolveCommandControlCameraOnRun()
+        {
+            var t = AccessTools.TypeByName("Kingmaker.AreaLogic.Cutscenes.Commands.CommandControlCamera");
+            var m = PickTwoArgOnRun(t);
+            if (m == null && t != null) m = PickTwoArgOnRun(t.BaseType);
+            return m;
+        }
+
+        static MethodBase PickTwoArgOnRun(Type t)
+        {
+            if (t == null) return null;
+            MethodInfo fallback = null;
+            foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+            {
+                if (m.Name != "OnRun") continue;
+                var ps = m.GetParameters();
+                if (ps.Length == 2 && ps[1].ParameterType == typeof(bool)) return m;   // the entry the mod gates on
+                if (fallback == null) fallback = m;
+            }
+            return fallback;
+        }
 
         // RootUIContext: RT "Kingmaker.Code.UI.MVVM.RootUIContext", WotR "Kingmaker.UI.MVVM.RootUIContext".
         internal static Type RootUIContext;
@@ -3153,7 +3230,7 @@ namespace ServoSkullCameraControls
     [HarmonyPatch]
     static class ControlCamera_OnRun_Gate
     {
-        static MethodBase TargetMethod() => AccessTools.Method("Kingmaker.AreaLogic.Cutscenes.Commands.CommandControlCamera:OnRun");
+        static MethodBase TargetMethod() => Compat.ResolveCommandControlCameraOnRun();
         static bool Prepare() => TargetMethod() != null;
         static void Postfix() => CutsceneCameraGate.OnCamCommandRun();
     }
@@ -3174,8 +3251,13 @@ namespace ServoSkullCameraControls
 
     // ------------------------------------------------------------------------------------------------
     // Gamepad right-stick capture. Rewired decodes the stick and hands the vector to the exploration input
-    // layer's OnMoveRightStick(InputActionEventData, Vector2); we read both axes off the Vector2 and stamp the
-    // frame, so TickGamepadPitchHold can drive View 1's pitch from Y and TickGamepadYawMult can amplify yaw from X.
+    // layer's OnMoveRightStick(InputActionEventData, Vector2); we read the already-decoded axes off the Vector2
+    // (no raw-axis access) and stamp the frame, so TickGamepadPitchHold can drive View 1's pitch from Y and
+    // TickGamepadYawTakeover can drive yaw from X. A PREFIX with ref access, not a postfix: when the yaw
+    // takeover is active it zeroes the vector's X in place (after capturing the original), which suppresses the
+    // game's native turn at the source in BOTH games - RT stores the argument in m_RightStickVector for its
+    // OnUpdate rotate, WotR's (static) handler rotates from the argument directly - so no per-game field
+    // reflection is needed and stick-Y (View 2's native zoom) is never touched.
     // Both RT (SurfaceMainInputLayer) and WotR (InGameInputLayer) put the stick vector at argument index 1,
     // verified against both assemblies, so we bind it positionally as __1. (We deliberately avoid the __args
     // all-arguments injection: the older Harmony bundled with WotR doesn't support it and throws at patch time.)
@@ -3183,31 +3265,35 @@ namespace ServoSkullCameraControls
     [HarmonyPatch]
     static class SurfaceRightStick_Capture
     {
-        static System.Reflection.FieldInfo _rightStickVectorField;
-
         static MethodBase TargetMethod() =>
             AccessTools.Method("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer:OnMoveRightStick")
             ?? AccessTools.Method("Kingmaker.UI._ConsoleUI.InputLayers.InGameLayer.InGameInputLayer:OnMoveRightStick");
         static bool Prepare() => TargetMethod() != null;
-        static void Postfix(object __instance, Vector2 __1)
+        static void Prefix(ref Vector2 __1)
         {
             Main.GpRightStickY = __1.y;
             Main.GpRightStickX = __1.x;
             Main.GpRightStickFrame = Time.frameCount;
-
-            // Suppress the game's own UpdateRightStickMovement so it doesn't apply fixed-step
-            // RotateRight/RotateLeft on top of our proportional yaw amplification. Zero the
-            // layer's m_RightStickVector when our yaw mult is active; the game's OnUpdate reads
-            // it later this frame and will see zero, skipping MoveRotateCamera entirely.
-            if (Main.Active && Main.settings != null && Main.ActiveViewNum != 0
-                && CameraRig_UpdateInternal_Patch.InGamepadMode())
-            {
-                if (_rightStickVectorField == null && __instance != null)
-                    _rightStickVectorField = AccessTools.Field(__instance.GetType(), "m_RightStickVector");
-                if (_rightStickVectorField != null)
-                    _rightStickVectorField.SetValue(__instance, Vector2.zero);
-            }
+            if (Main.GamepadYawTakeoverActive())
+                __1.x = 0f;   // the mod owns the turn this frame; don't let the native rotate stack on it
         }
+    }
+
+    // The game's R3 click toggles the pad camera between rotate mode and panning/free-camera mode
+    // (Game.Instance.Player.IsCameraRotateMode, identical field in both games; RT flips it in
+    // SurfaceHUDConsoleView.ChangeCameraRotateMode, WotR in InGameConsoleView.OnChangeCameraRotateMode,
+    // each also playing a click sound / refreshing the hint). View 1 uses R3-hold as the zoom chord, so the
+    // toggle is suppressed outright there - skipping the handler suppresses the flip, the sound and the hint
+    // together. Other views and mouse mode keep the native toggle; the local-map screen has its own handler,
+    // which is deliberately not touched.
+    [HarmonyPatch]
+    static class CameraRotateModeToggle_Gate
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method("Kingmaker.Code.UI.MVVM.View.SurfaceCombat.Console.SurfaceHUDConsoleView:ChangeCameraRotateMode")
+            ?? AccessTools.Method("Kingmaker.UI.MVVM._ConsoleView.InGame.InGameConsoleView:OnChangeCameraRotateMode");
+        static bool Prepare() => TargetMethod() != null;
+        static bool Prefix() => !Main.SuppressPanModeToggle();   // false = swallow the R3 toggle while View 1 owns the stick
     }
 
     // ------------------------------------------------------------------------------------------------
