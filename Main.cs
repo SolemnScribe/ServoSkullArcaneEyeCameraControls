@@ -1020,6 +1020,30 @@ namespace ServoSkullCameraControls
             catch { }
         }
 
+        // WotR shows a persistent console hint for the R3 skip-time shortcut (glyph + a radial that fills as
+        // R3 is held). With the shortcut suppressed on View 1 the hint would advertise a dead control, so it
+        // is hidden under exactly the same condition and restored the moment the condition lifts (view
+        // switch, pad->mouse, mod off). The ConsoleHint component is captured when the in-game console HUD
+        // binds (see SkipTimeHint_Capture_WotRPatch); a destroyed component fails the Unity alive check and
+        // is simply skipped until the next bind recaptures it. State-change writes only - no per-frame cost.
+        internal static Component SkipTimeHintComponent;
+        static bool _skipTimeHintHidden;
+
+        internal static void TickSkipTimeHintVisibility()
+        {
+            if (Compat.Ui != Compat.UiKind.WotR) return;
+            var hint = SkipTimeHintComponent;
+            if (hint == null) { _skipTimeHintHidden = false; return; }   // Unity alive check (fake-null when destroyed)
+            bool hide = SuppressPanModeToggle();
+            if (hide == _skipTimeHintHidden) return;
+            try
+            {
+                hint.gameObject.SetActive(!hide);
+                _skipTimeHintHidden = hide;
+            }
+            catch { SkipTimeHintComponent = null; _skipTimeHintHidden = false; }
+        }
+
         // Applies the taken-over yaw: the stick turns the camera at GamepadYawRate x GamepadYawSpeedMult
         // deg/s. Writes the transform yaw and m_TargetRotate.y together - the same pattern mouselook uses -
         // so the rig's rubber-band doesn't slerp the turn back. Native rotation is suppressed at the source
@@ -2224,6 +2248,7 @@ namespace ServoSkullCameraControls
             if (comp == null) { _hasClean = false; return; }
 
             Main.CurrentRig = __instance;
+            Main.TickSkipTimeHintVisibility();   // WotR: hide/restore the R3 skip-time hint; must run even when the mod is inactive so the hint is restored
 
             if (!Main.Active || Main.settings == null)
             {
@@ -3294,6 +3319,51 @@ namespace ServoSkullCameraControls
             ?? AccessTools.Method("Kingmaker.UI.MVVM._ConsoleView.InGame.InGameConsoleView:OnChangeCameraRotateMode");
         static bool Prepare() => TargetMethod() != null;
         static bool Prefix() => !Main.SuppressPanModeToggle();   // false = swallow the R3 toggle while View 1 owns the stick
+    }
+
+    // WotR only: the pad's R3 also triggers the skip-time/rest shortcut, which collides with our R3-hold
+    // zoom on View 1. The input binding lands on InGameStaticPartConsoleView.OnShowSkipTimeMenu, whose
+    // entire body is one call to RestHelper.TrySkipTime - so skipping THIS handler removes exactly the R3
+    // trigger and nothing else. TrySkipTime/TryStartRest themselves are untouched: the in-game menu's Skip
+    // Time (IngameMenuVM.SkipTime) and the right-trigger wheel's Rest (IngameMenuVM.OpenRestCamp ->
+    // TryStartRest) call them through their own paths and keep working. (An earlier attempt gated
+    // TryStartRest itself and broke the wheel's Rest - the wheel is not a service window, so a UI-state
+    // gate could not tell it apart from the shortcut. Cutting at the input handler needs no UI-state
+    // guessing at all.) RT has no such binding; Prepare gates this to WotR.
+    [HarmonyPatch]
+    static class SkipTimeShortcut_Gate_WotRPatch
+    {
+        static MethodBase TargetMethod() => AccessTools.Method(
+            "Kingmaker.UI.MVVM._ConsoleView.InGame.InGameStaticPartConsoleView:OnShowSkipTimeMenu");
+        static bool Prepare() => Compat.Ui == Compat.UiKind.WotR && TargetMethod() != null;
+        static bool _logged;
+        static bool Prefix()
+        {
+            if (!Main.SuppressPanModeToggle()) return true;   // same "View 1 owns R3" condition as the mode toggle
+            if (!_logged) { _logged = true; Main.Log?.Log("Gamepad: R3 skip-time/rest shortcut suppressed on View 1 (Skip Time and Rest remain available from the menus)."); }
+            return false;                                     // swallow the R3 trigger; menu paths are separate calls
+        }
+    }
+
+    // Captures the in-game console HUD's skip-time ConsoleHint (glyph + hold fill) each time the HUD binds,
+    // so TickSkipTimeHintVisibility can hide it while the R3 shortcut is suppressed. Rebinding on area/UI
+    // changes recaptures automatically; nothing here mutates the view.
+    [HarmonyPatch]
+    static class SkipTimeHint_Capture_WotRPatch
+    {
+        static MethodBase TargetMethod() => AccessTools.Method(
+            "Kingmaker.UI.MVVM._ConsoleView.InGame.InGameConsoleView:BindViewImplementation");
+        static bool Prepare() => Compat.Ui == Compat.UiKind.WotR && TargetMethod() != null;
+        static System.Reflection.FieldInfo _hintField;
+        static void Postfix(object __instance)
+        {
+            try
+            {
+                if (_hintField == null) _hintField = AccessTools.Field(__instance.GetType(), "m_SkipTimeHint");
+                Main.SkipTimeHintComponent = _hintField?.GetValue(__instance) as Component;
+            }
+            catch { Main.SkipTimeHintComponent = null; }
+        }
     }
 
     // ------------------------------------------------------------------------------------------------
