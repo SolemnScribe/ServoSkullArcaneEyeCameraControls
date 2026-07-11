@@ -1680,6 +1680,13 @@ namespace ServoSkullCameraControls
         // _occluderSuppressed tracks whether we are the ones currently holding it off, so OnToggle can
         // restore it if the mod is disabled mid-view.
         static bool _occluderSuppressed;
+        // DIAGNOSTIC (temporary; remove before release): the mod's last intended clip state, so we log only
+        // our own transitions (not every frame) and can tell mod-driven changes apart from the game's
+        // CameraObjectClipFeature.Create writes in the log. -1 = unset, 0 = we want it disabled (walls solid),
+        // 1 = we want it enabled. _occluderIdleMismatchLogged dedupes the "game turned it off while we're idle"
+        // notice so it fires once per stuck-off episode.
+        static int _occluderModWant = -1;
+        static bool _occluderIdleMismatchLogged;
 
         // The active view wants solid walls, minus the standdowns shared by both games' suppression paths:
         // hands off on the map, during hard-bound shots, and during in-dialogue scripted camera shots.
@@ -1697,15 +1704,71 @@ namespace ServoSkullCameraControls
         {
             if (Compat.Ui == Compat.UiKind.WotR) return;   // WotR suppression is the OccludedHighlight feature-flag postfix, not RT's clip service
             bool want = SolidWallsWanted();
-            if (want) { OccluderClip.SetGameClipEnabled(false); _occluderSuppressed = true; }
-            else if (_occluderSuppressed) { OccluderClip.SetGameClipEnabled(true); _occluderSuppressed = false; }
+
+            // Original released behaviour: re-assert the off-state every frame while a solid-walls view is
+            // active (an area load / camera swap can bring the see-through back), and re-enable once on leaving.
+            if (want)
+            {
+                LogOccluderDecision(false, "solid-walls view active");
+                OccluderClip.SetGameClipEnabled(false);
+                _occluderSuppressed = true;
+                _occluderIdleMismatchLogged = false;
+            }
+            else if (_occluderSuppressed)
+            {
+                LogOccluderDecision(true, OccluderStanddownReason());
+                OccluderClip.SetGameClipEnabled(true);
+                _occluderSuppressed = false;
+                _occluderIdleMismatchLogged = false;
+            }
+            else
+            {
+                // Idle on a non-solid-walls view: the mod is deliberately hands-off. If we last left the clip
+                // enabled but it is now stopped, some other writer (the game's CameraObjectClipFeature.Create
+                // on a camera swap - the only non-mod caller of SetEnabled) turned it off. Log once so the
+                // quiet-area test can confirm whether that is why the door stays solid here.
+                if (_occluderModWant == 1 && !OccluderClip.IsServiceRunning())
+                {
+                    if (!_occluderIdleMismatchLogged)
+                    {
+                        _occluderIdleMismatchLogged = true;
+                        Main.Log?.Log("Occluder(mod): idle on view=" + ActiveViewNum + " (solid-walls off) but the fade service is STOPPED - turned off by the game, not the mod. Walls stay solid until the game re-enables it.");
+                    }
+                }
+                else _occluderIdleMismatchLogged = false;   // re-arm when it comes back up
+            }
+        }
+
+        // DIAGNOSTIC: log only the mod's own intent transitions (dedup on _occluderModWant), with the service's
+        // actual running state at that instant. Correlate against the game's "OccluderFadeSystem: Enable status
+        // changed" lines: any game line with no mod line beside it is a Create-driven change, not ours.
+        static void LogOccluderDecision(bool enable, string reason)
+        {
+            int w = enable ? 1 : 0;
+            if (w == _occluderModWant) return;
+            _occluderModWant = w;
+            Main.Log?.Log("Occluder(mod): " + (enable ? "ENABLE (restore)" : "DISABLE (suppress)")
+                + " - " + reason + " [view=" + ActiveViewNum + ", serviceRunningBefore=" + OccluderClip.IsServiceRunning() + "]");
+        }
+
+        static string OccluderStanddownReason()
+        {
+            var v = ActiveViewObj();
+            if (v == null) return "vanilla / no active view";
+            if (!v.SolidWalls) return "this view has solid-walls off";
+            if (CameraRig_UpdateInternal_Patch.InMapMode()) return "map-mode standdown";
+            if (CameraRig_UpdateInternal_Patch.LastHardBind) return "hard-bind (scripted shot) standdown";
+            if (CutsceneCameraGate.CameraCutsceneActive()) return "camera-cutscene standdown";
+            return "want=false";
         }
 
         static void RestoreOccluderClip()
         {
             if (!_occluderSuppressed) return;
+            Main.Log?.Log("Occluder(mod): restore on mod standdown/disable [view=" + ActiveViewNum + "]");
             OccluderClip.SetGameClipEnabled(true);
             _occluderSuppressed = false;
+            _occluderModWant = 1;
         }
 
         // Active view index (0/1/2); exposed so the patch classes can read it for the trace.
@@ -1944,14 +2007,16 @@ namespace ServoSkullCameraControls
     static class OccluderClip
     {
         static MethodInfo _setEnabled;
-        static bool _resolved, _warned;
+        static Type _sysType;
+        static FieldInfo _serviceField;
+        static bool _resolved, _warned, _serviceFieldTried;
 
         static void Resolve()
         {
             if (_resolved) return;
             _resolved = true;
-            var t = AccessTools.TypeByName("Owlcat.Runtime.Visual.OcclusionGeometryClip.System");
-            if (t != null) _setEnabled = AccessTools.Method(t, "SetEnabled", new[] { typeof(bool) });
+            _sysType = AccessTools.TypeByName("Owlcat.Runtime.Visual.OcclusionGeometryClip.System");
+            if (_sysType != null) _setEnabled = AccessTools.Method(_sysType, "SetEnabled", new[] { typeof(bool) });
             if (_setEnabled == null && !_warned)
             {
                 _warned = true;
@@ -1967,6 +2032,27 @@ namespace ServoSkullCameraControls
             if (_setEnabled == null) return;
             try { _setEnabled.Invoke(null, new object[] { on }); }
             catch (Exception e) { Main.Log?.Error("OccluderClip.SetGameClipEnabled failed: " + e); }
+        }
+
+        // True when the fade service object actually exists. SetEnabled tears the service down / rebuilds it,
+        // and StartService is gated on the game's own availability flag, so "enabled" does not guarantee
+        // "running". Reads the private static s_Service by reflection; if the field can't be resolved on this
+        // game version, reports running (true) so the restore-confirm degrades to a single re-enable rather
+        // than looping. Null return from GetValue means the service is stopped.
+        public static bool IsServiceRunning()
+        {
+            Resolve();
+            if (_sysType == null) return true;
+            if (!_serviceFieldTried)
+            {
+                _serviceFieldTried = true;
+                _serviceField = AccessTools.Field(_sysType, "s_Service");
+                if (_serviceField == null)
+                    Main.Log?.Log("OccluderClip: s_Service field not found on this game version - solid-walls restore falls back to a single re-enable.");
+            }
+            if (_serviceField == null) return true;
+            try { return _serviceField.GetValue(null) != null; }
+            catch { return true; }
         }
     }
 
