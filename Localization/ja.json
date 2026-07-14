@@ -80,6 +80,9 @@
     "gamepad deadzone: ": "ゲームパッドのデッドゾーン: ",
     "gamepad turn speed: ": "ゲームパッドの回転速度: ",
     "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1.0×はゲーム本来の回転をそのまま維持し、他の値では比例回転に置き換わります",
-    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– 右スティック押し込み（R3）を押しながらスティックを上下に倮すとズーム（パッドのビュー1）"
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– 右スティック押し込み（R3）を押しながらスティックを上下に倮すとズーム（パッドのビュー1）",
+    "On entering combat, switch to:": "戦闘開始時に切り替え:",
+    "On leaving combat, switch to:": "戦闘終了時に切り替え:",
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– 戦闘の開始または終了時に一度だけ作動します。保存されていないビューはスキップされます。宇宙戦闘（Rogue Trader）は対象外です。"
   }
 }

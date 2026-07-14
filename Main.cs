@@ -51,6 +51,13 @@ namespace ServoSkullCameraControls
         public bool  DialogFramingMigrated = false;  // set once DialogVerticalOffset has been copied into the per-view DialogHeight fields
         public bool  PadFreeAimMigrated = false;      // set once the new per-view PadFreeAimCursor default has been seeded (View 1 on)
 
+        // --- Automatic view change on combat enter/leave (views stored as _activeView ints: 0 Vanilla, 1, 2) ---
+        // Independent of the toggle-cycle checkboxes: combat may force a view that is not in the manual ring.
+        public bool AutoViewOnCombatEnter = true;
+        public int  CombatEnterView       = 0;   // default Vanilla
+        public bool AutoViewOnCombatLeave = true;
+        public int  CombatLeaveView       = 1;   // default View 1
+
         // --- Pitch range (widens the band the native Mouse3 drag is clamped to) ---
         public bool PitchRangeEnabled = true;
         public float MinPitchAngle = 15f;       // flattest the drag may reach
@@ -286,6 +293,7 @@ namespace ServoSkullCameraControls
             CameraRig_UpdateInternal_Patch.ResetMouselookSeat();
             _vanillaCaptured = false;
             _viewAssertActive = false;
+            OccluderCamera.OnGameLoad();   // re-enable/forget held cameras across a load; rescan lands next frame if still suppressing
         }
         internal static void NotifyAreaDidLoad()
         {
@@ -457,7 +465,7 @@ namespace ServoSkullCameraControls
             Active = value;
             if (!value)
             {
-                RestoreOccluderClip();   // mod disabled in UMM: re-enable the game's clip if we were holding it off
+                RestoreOccluderClip();   // mod disabled in UMM: re-register any occlusion-fade targets we were holding off
                 ApplyVanilla();          // and hand the camera back to its stock framing
             }
             return true;
@@ -594,8 +602,78 @@ namespace ServoSkullCameraControls
                 else if (KeyDown(settings.GamepadToggleKey)) ToggleViews();
             }
 
+            // Auto view-change on combat enter/leave (polled edge on Player.IsInCombat).
+            TickCombatAutoView();
+
             // Hold RT's occluder see-through off while a solid-walls view is active (restored when we leave it).
             UpdateOccluderClip();
+        }
+
+        // Combat enter/leave -> switch to the user's chosen view. Polls Player.IsInCombat (party-level, present
+        // and identical on both games) once per frame and edge-detects here rather than subscribing to the
+        // per-unit combat events, which differ per game and would need PubSubSystem lifecycle plumbing. The
+        // first observed frame only seeds the state (no action), so loading a save mid-combat does not fire.
+        // Covers surface/tactical combat - what IsInCombat reports; RT space combat is a separate system and
+        // out of scope. Applying a view reuses the same ApplyView/ApplyVanilla path the toggle key uses, so
+        // the normal standdowns (map, hard-bind, cutscene) govern when the framing actually moves.
+        static bool _combatStateResolved;
+        static System.Reflection.PropertyInfo _isInCombatProp;
+        static bool _wasInCombat;
+        static bool _combatSeeded;
+
+        static void TickCombatAutoView()
+        {
+            if (settings == null) return;
+            if (!settings.AutoViewOnCombatEnter && !settings.AutoViewOnCombatLeave) { _combatSeeded = false; return; }
+
+            if (!TryReadInCombat(out bool inCombat)) { _combatSeeded = false; return; }
+
+            if (!_combatSeeded) { _wasInCombat = inCombat; _combatSeeded = true; return; }   // seed only, no switch
+            if (inCombat == _wasInCombat) return;
+            _wasInCombat = inCombat;
+
+            if (inCombat)
+            {
+                if (settings.AutoViewOnCombatEnter) ApplyAutoCombatView(settings.CombatEnterView, "combat started");
+            }
+            else
+            {
+                if (settings.AutoViewOnCombatLeave) ApplyAutoCombatView(settings.CombatLeaveView, "combat ended");
+            }
+        }
+
+        static bool TryReadInCombat(out bool inCombat)
+        {
+            inCombat = false;
+            try
+            {
+                if (!CameraRig_UpdateInternal_Patch.TryGetGame(out object game)) return false;
+                if (!_combatStateResolved)
+                {
+                    _combatStateResolved = true;
+                    var playerProp = AccessTools.Property(game.GetType(), "Player");
+                    var pType = playerProp?.PropertyType ?? AccessTools.TypeByName("Kingmaker.Player");
+                    if (pType != null) _isInCombatProp = AccessTools.Property(pType, "IsInCombat");
+                    _combatPlayerProp = playerProp;
+                }
+                if (_combatPlayerProp == null || _isInCombatProp == null) return false;
+                object player = _combatPlayerProp.GetValue(game, null);
+                if (player == null) return false;
+                inCombat = (bool)_isInCombatProp.GetValue(player, null);
+                return true;
+            }
+            catch { return false; }
+        }
+        static System.Reflection.PropertyInfo _combatPlayerProp;
+
+        static void ApplyAutoCombatView(int view, string reason)
+        {
+            // Same entry as the toggle key; a solid-walls/map/hard-bind standdown still governs when framing moves.
+            if (view == 0) { ApplyVanilla(); }
+            else if (view == 1 && settings.View1 != null && settings.View1.IsSet) { ApplyView(settings.View1); _activeView = 1; }
+            else if (view == 2 && settings.View2 != null && settings.View2.IsSet) { ApplyView(settings.View2); _activeView = 2; }
+            else { Log?.Log("Auto view on " + reason + ": target view " + view + " is not saved; leaving the camera as-is."); return; }
+            Log?.Log("Auto view on " + reason + ": switched to " + (view == 0 ? "Vanilla" : "View " + view) + ".");
         }
 
         static bool KeyDown(int k) => k != (int)KeyCode.None && Input.GetKeyDown((KeyCode)k);
@@ -1358,6 +1436,19 @@ namespace ServoSkullCameraControls
             settings.CycleVanilla = GUILayout.Toggle(settings.CycleVanilla, L("Vanilla"), GUILayout.Width(90f));
             GUILayout.EndHorizontal();
             GUILayout.Label("     " + L("\u2013 the toggle key steps through the ticked targets in order; Vanilla is the game's own camera."));
+
+            // Automatic view change on combat enter/leave. The pickers are independent of the cycle targets above.
+            GUILayout.Space(4f);
+            GUILayout.BeginHorizontal();
+            settings.AutoViewOnCombatEnter = GUILayout.Toggle(settings.AutoViewOnCombatEnter, "     " + L("On entering combat, switch to:"), GUILayout.Width(260f));
+            settings.CombatEnterView = GUILayout.Toolbar(ClampView(settings.CombatEnterView), new[] { L("Vanilla"), L("View 1"), L("View 2") }, GUILayout.Width(270f));
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            settings.AutoViewOnCombatLeave = GUILayout.Toggle(settings.AutoViewOnCombatLeave, "     " + L("On leaving combat, switch to:"), GUILayout.Width(260f));
+            settings.CombatLeaveView = GUILayout.Toolbar(ClampView(settings.CombatLeaveView), new[] { L("Vanilla"), L("View 1"), L("View 2") }, GUILayout.Width(270f));
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     " + L("\u2013 fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered."));
+
             settings.GamepadInvertPitch = GUILayout.Toggle(settings.GamepadInvertPitch, "     " + L("Invert gamepad pitch  \u2013 flip the right-stick up/down look direction (View 1 on a pad)"));
             GUILayout.BeginHorizontal();
             GUILayout.Label("     " + L("gamepad deadzone: ") + settings.GamepadDeadzone.ToString("0.00"), GUILayout.Width(185f));
@@ -1584,6 +1675,9 @@ namespace ServoSkullCameraControls
 
         static float Snap(float value, float step) => Mathf.Round(value / step) * step;
 
+        // Guards a persisted combat-view index (0/1/2) against a bad/out-of-range value before it indexes the toolbar.
+        static int ClampView(int v) => (v < 0 || v > 2) ? 0 : v;
+
         // Per-view keyboard-rotation multiplier for whichever preset is currently active (1 if none).
         internal static float ActiveViewRotMult()
         {
@@ -1675,18 +1769,13 @@ namespace ServoSkullCameraControls
 
         // --- Solid walls (per view): while a view with SolidWalls set is active we hold RT's occluder
         // see-through clip off, so walls and doors in front of the camera stay solid instead of dissolving.
-        // We re-assert the off state every frame (an area load restarts the clip service, which would
-        // otherwise bring the see-through back), and re-enable it once when we leave such a view.
-        // _occluderSuppressed tracks whether we are the ones currently holding it off, so OnToggle can
-        // restore it if the mod is disabled mid-view.
+        // Solid walls (RT) works by taking the occlusion-fade system's CAMERA offline (see OccluderCamera
+        // below for the full mechanism archaeology - this is the third lever, and the first two failed in
+        // instructive ways). The fade service itself is never touched: it keeps running, casts nothing
+        // without a camera, and so actively fades all geometry back to solid - nothing can freeze.
+        // _occluderSuppressed tracks whether we currently hold the camera off, so OnToggle can restore it
+        // if the mod is disabled mid-view.
         static bool _occluderSuppressed;
-        // DIAGNOSTIC (temporary; remove before release): the mod's last intended clip state, so we log only
-        // our own transitions (not every frame) and can tell mod-driven changes apart from the game's
-        // CameraObjectClipFeature.Create writes in the log. -1 = unset, 0 = we want it disabled (walls solid),
-        // 1 = we want it enabled. _occluderIdleMismatchLogged dedupes the "game turned it off while we're idle"
-        // notice so it fires once per stuck-off episode.
-        static int _occluderModWant = -1;
-        static bool _occluderIdleMismatchLogged;
 
         // The active view wants solid walls, minus the standdowns shared by both games' suppression paths:
         // hands off on the map, during hard-bound shots, and during in-dialogue scripted camera shots.
@@ -1702,53 +1791,23 @@ namespace ServoSkullCameraControls
 
         static void UpdateOccluderClip()
         {
-            if (Compat.Ui == Compat.UiKind.WotR) return;   // WotR suppression is the OccludedHighlight feature-flag postfix, not RT's clip service
+            if (Compat.Ui == Compat.UiKind.WotR) return;   // WotR suppression is the OccludedHighlight feature-flag postfix, not RT's fade targets
             bool want = SolidWallsWanted();
-
-            // Original released behaviour: re-assert the off-state every frame while a solid-walls view is
-            // active (an area load / camera swap can bring the see-through back), and re-enable once on leaving.
             if (want)
             {
-                LogOccluderDecision(false, "solid-walls view active");
-                OccluderClip.SetGameClipEnabled(false);
-                _occluderSuppressed = true;
-                _occluderIdleMismatchLogged = false;
+                if (!_occluderSuppressed)
+                {
+                    _occluderSuppressed = true;
+                    Main.Log?.Log("Solid walls (RT): taking the occlusion-fade camera offline [view=" + ActiveViewNum + "]");
+                }
+                OccluderCamera.Suppress();   // throttled rescan inside: also catches camera swaps mid-view
             }
             else if (_occluderSuppressed)
             {
-                LogOccluderDecision(true, OccluderStanddownReason());
-                OccluderClip.SetGameClipEnabled(true);
                 _occluderSuppressed = false;
-                _occluderIdleMismatchLogged = false;
+                int n = OccluderCamera.Restore();
+                Main.Log?.Log("Solid walls (RT): restored " + n + " occlusion-fade camera(s) - " + OccluderStanddownReason() + " [view=" + ActiveViewNum + "]");
             }
-            else
-            {
-                // Idle on a non-solid-walls view: the mod is deliberately hands-off. If we last left the clip
-                // enabled but it is now stopped, some other writer (the game's CameraObjectClipFeature.Create
-                // on a camera swap - the only non-mod caller of SetEnabled) turned it off. Log once so the
-                // quiet-area test can confirm whether that is why the door stays solid here.
-                if (_occluderModWant == 1 && !OccluderClip.IsServiceRunning())
-                {
-                    if (!_occluderIdleMismatchLogged)
-                    {
-                        _occluderIdleMismatchLogged = true;
-                        Main.Log?.Log("Occluder(mod): idle on view=" + ActiveViewNum + " (solid-walls off) but the fade service is STOPPED - turned off by the game, not the mod. Walls stay solid until the game re-enables it.");
-                    }
-                }
-                else _occluderIdleMismatchLogged = false;   // re-arm when it comes back up
-            }
-        }
-
-        // DIAGNOSTIC: log only the mod's own intent transitions (dedup on _occluderModWant), with the service's
-        // actual running state at that instant. Correlate against the game's "OccluderFadeSystem: Enable status
-        // changed" lines: any game line with no mod line beside it is a Create-driven change, not ours.
-        static void LogOccluderDecision(bool enable, string reason)
-        {
-            int w = enable ? 1 : 0;
-            if (w == _occluderModWant) return;
-            _occluderModWant = w;
-            Main.Log?.Log("Occluder(mod): " + (enable ? "ENABLE (restore)" : "DISABLE (suppress)")
-                + " - " + reason + " [view=" + ActiveViewNum + ", serviceRunningBefore=" + OccluderClip.IsServiceRunning() + "]");
         }
 
         static string OccluderStanddownReason()
@@ -1764,11 +1823,12 @@ namespace ServoSkullCameraControls
 
         static void RestoreOccluderClip()
         {
-            if (!_occluderSuppressed) return;
-            Main.Log?.Log("Occluder(mod): restore on mod standdown/disable [view=" + ActiveViewNum + "]");
-            OccluderClip.SetGameClipEnabled(true);
+            // Mod standdown/disable path. Restore() is idempotent and cheap when nothing is held, so always
+            // run it - covers any straggler even if the suppressed flag desynced.
+            int n = OccluderCamera.Restore();
+            if (_occluderSuppressed || n > 0)
+                Main.Log?.Log("Solid walls (RT): restored " + n + " occlusion-fade camera(s) on mod standdown/disable [view=" + ActiveViewNum + "]");
             _occluderSuppressed = false;
-            _occluderModWant = 1;
         }
 
         // Active view index (0/1/2); exposed so the patch classes can read it for the trace.
@@ -1999,60 +2059,108 @@ namespace ServoSkullCameraControls
         }
     }
 
-    // Toggles RT's occluder see-through - the render-pipeline service that dissolves walls and doors
-    // between the camera and your party so you can see units behind cover. Disabling it leaves that
-    // geometry solid. The lever is the static Owlcat.Runtime.Visual.OcclusionGeometryClip.System.SetEnabled,
-    // which stops/starts the whole clip service; it no-ops when the value is unchanged, so re-asserting it
-    // each frame is cheap. Resolved by reflection so the mod needs no reference to the visual assembly.
-    static class OccluderClip
+    // Solid walls (RT): takes the occlusion-fade system's CAMERA offline. Third mechanism; the
+    // archaeology matters, so it lives here:
+    //   1) System.SetEnabled(false) (global service stop, shipped through 1.35.1): the service animates
+    //      per-renderer opacity into a MaterialPropertyBlock and only rewrites renderers whose opacity
+    //      CHANGED that frame - stopping it froze every wall at its current opacity, and a later restart
+    //      initialised its registry as "all opaque", so a wall frozen mid-dissolve was never repainted:
+    //      stuck see-through until an area reload.
+    //   2) Holding every OcclusionGeometryClipTarget's ClippingEnabled=false (per-target unregistration,
+    //      verified to reach the LIVE service): executed correctly, yet walls kept dissolving with zero
+    //      registered targets - the cast geometry supports a camera-derived dynamic target
+    //      (FrustumCastGeometry.dynamicTargetMode), so RT's near-camera wall dissolve does not depend on
+    //      registered targets at all. Do not reattempt.
+    //   3) This: OcclusionGeometryClipCamera is a MonoBehaviour whose OnEnable/OnDisable call the system's
+    //      RegisterCamera/UnregisterCamera - the exact path exercised whenever a camera object is destroyed
+    //      on scene unload, so the service tolerates it by construction. Disabling the component starves
+    //      EVERY cast path (registered-target and dynamic alike) while the service and its opacity
+    //      animation keep running, so geometry actively fades back to solid and can never freeze.
+    // Discovery is FindObjectsOfType on a throttle (catches camera swaps: photo mode, scripted cameras).
+    // Cameras the GAME already had disabled are left alone - only ones we flipped are recorded and
+    // restored. Resolved by reflection; no visual-assembly reference.
+    static class OccluderCamera
     {
-        static MethodInfo _setEnabled;
-        static Type _sysType;
-        static FieldInfo _serviceField;
-        static bool _resolved, _warned, _serviceFieldTried;
+        const float ScanIntervalSeconds = 1f;   // catch camera components that appear mid-view
 
-        static void Resolve()
+        static Type _cameraType;
+        static bool _resolved, _warned;
+        static readonly System.Collections.Generic.List<Behaviour> _held = new System.Collections.Generic.List<Behaviour>();
+        static float _nextScanTime;
+        static int _lastLoggedCount = -1;
+
+        static bool Resolve()
         {
-            if (_resolved) return;
+            if (_resolved) return _cameraType != null;
             _resolved = true;
-            _sysType = AccessTools.TypeByName("Owlcat.Runtime.Visual.OcclusionGeometryClip.System");
-            if (_sysType != null) _setEnabled = AccessTools.Method(_sysType, "SetEnabled", new[] { typeof(bool) });
-            if (_setEnabled == null && !_warned)
+            _cameraType = AccessTools.TypeByName("Owlcat.Runtime.Visual.OcclusionGeometryClip.OcclusionGeometryClipCamera");
+            if (_cameraType == null && !_warned)
             {
                 _warned = true;
-                Main.Log?.Error("OccluderClip: OcclusionGeometryClip.System.SetEnabled not found - the solid-walls toggle will do nothing.");
+                Main.Log?.Error("OccluderCamera: OcclusionGeometryClipCamera not found - the solid-walls toggle will do nothing.");
             }
+            return _cameraType != null;
         }
 
-        // on == true  -> the game's clip service runs (normal see-through)
-        // on == false -> service stopped (walls and doors stay solid)
-        public static void SetGameClipEnabled(bool on)
+        // Called every frame while a solid-walls view is active; rescans on a throttle. Disabling the
+        // component runs its OnDisable, which unregisters the camera from the live service - no casts, no
+        // dissolve. Steady-state cost between scans is one time comparison.
+        public static void Suppress()
         {
-            Resolve();
-            if (_setEnabled == null) return;
-            try { _setEnabled.Invoke(null, new object[] { on }); }
-            catch (Exception e) { Main.Log?.Error("OccluderClip.SetGameClipEnabled failed: " + e); }
-        }
-
-        // True when the fade service object actually exists. SetEnabled tears the service down / rebuilds it,
-        // and StartService is gated on the game's own availability flag, so "enabled" does not guarantee
-        // "running". Reads the private static s_Service by reflection; if the field can't be resolved on this
-        // game version, reports running (true) so the restore-confirm degrades to a single re-enable rather
-        // than looping. Null return from GetValue means the service is stopped.
-        public static bool IsServiceRunning()
-        {
-            Resolve();
-            if (_sysType == null) return true;
-            if (!_serviceFieldTried)
+            if (!Resolve()) return;
+            if (Time.unscaledTime < _nextScanTime) return;
+            _nextScanTime = Time.unscaledTime + ScanIntervalSeconds;
+            try
             {
-                _serviceFieldTried = true;
-                _serviceField = AccessTools.Field(_sysType, "s_Service");
-                if (_serviceField == null)
-                    Main.Log?.Log("OccluderClip: s_Service field not found on this game version - solid-walls restore falls back to a single re-enable.");
+#pragma warning disable 0618    // FindObjectsOfType is obsolete on RT's Unity, but its replacement
+                                // (FindObjectsByType, added in Unity 2022.2) does not exist on WotR's older
+                                // engine - one shared source file must compile against both, so the
+                                // obsolete-but-present API is the only source-compatible call. The
+                                // deprecation's perf note (InstanceID sorting) is irrelevant to a
+                                // once-a-second scan over a handful of components.
+                var found = UnityEngine.Object.FindObjectsOfType(_cameraType);
+#pragma warning restore 0618
+                int newlyHeld = 0;
+                foreach (var o in found)
+                {
+                    var b = o as Behaviour;
+                    if (b == null || !b.enabled) continue;   // game/design already has it off - not ours to restore
+                    b.enabled = false;                        // OnDisable -> UnregisterCamera on the live service
+                    if (!_held.Contains(b)) { _held.Add(b); newlyHeld++; }
+                }
+                if (_held.Count != _lastLoggedCount)
+                {
+                    _lastLoggedCount = _held.Count;
+                    Main.Log?.Log("Solid walls (RT): holding " + _held.Count + " occlusion-fade camera(s) offline" + (newlyHeld > 0 ? " (+" + newlyHeld + " new)" : "") + ".");
+                }
             }
-            if (_serviceField == null) return true;
-            try { return _serviceField.GetValue(null) != null; }
-            catch { return true; }
+            catch (Exception e) { Main.Log?.Error("OccluderCamera.Suppress failed: " + e); }
+        }
+
+        // Re-enables every camera component we held off (skipping ones destroyed since). Idempotent;
+        // returns the number restored. Resets the scan throttle so the next suppression scans immediately.
+        public static int Restore()
+        {
+            int n = 0;
+            foreach (var b in _held)
+            {
+                if (b == null) continue;                     // Unity alive check (destroyed since we held it)
+                try { b.enabled = true; n++; }               // OnEnable -> RegisterCamera; normal fading resumes
+                catch { }
+            }
+            _held.Clear();
+            _nextScanTime = 0f;
+            _lastLoggedCount = -1;
+            return n;
+        }
+
+        // Area/save load. A load may or may not recreate the camera object; if it survived and we merely
+        // forgot it, it would stay disabled forever (walls solid on every view). So restore whatever we
+        // hold (alive checks inside) and let the next suppressing frame re-disable it - one frame of casts
+        // is invisible under the fade-in delay.
+        public static void OnGameLoad()
+        {
+            Restore();
         }
     }
 

@@ -80,6 +80,9 @@
     "gamepad deadzone: ": "手柄死区： ",
     "gamepad turn speed: ": "手柄转向速度： ",
     "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1.0× 保留游戏自身的转向；其他数值将以成比例的转向取而代之",
-    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– 按住右摇杆按钮（R3）并上下推动摇杆即可缩放（手柄上的视角1）"
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– 按住右摇杆按钮（R3）并上下推动摇杆即可缩放（手柄上的视角1）",
+    "On entering combat, switch to:": "进入战斗时切换到：",
+    "On leaving combat, switch to:": "离开战斗时切换到：",
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– 在战斗开始或结束时触发一次；未保存的视图将被跳过。不支持太空战斗（Rogue Trader）。"
   }
 }

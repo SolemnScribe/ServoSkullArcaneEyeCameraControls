@@ -80,6 +80,9 @@
     "gamepad deadzone: ": "мёртвая зона геймпада: ",
     "gamepad turn speed: ": "скорость поворота (геймпад): ",
     "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1,0× не трогает поворот самой игры; другие значения заменяют его пропорциональным поворотом",
-    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– удерживайте нажатие правого стика (R3) и отклоняйте стик вверх/вниз для зума (Вид 1 на геймпаде)"
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– удерживайте нажатие правого стика (R3) и отклоняйте стик вверх/вниз для зума (Вид 1 на геймпаде)",
+    "On entering combat, switch to:": "При входе в бой переключаться на:",
+    "On leaving combat, switch to:": "При выходе из боя переключаться на:",
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– срабатывает один раз в начале или конце боя; несохранённый вид пропускается. Космический бой (Rogue Trader) не поддерживается."
   }
 }

@@ -80,6 +80,9 @@
     "gamepad deadzone: ": "zona morta del gamepad: ",
     "gamepad turn speed: ": "velocità di rotazione del gamepad: ",
     "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1,0× lascia intatta la rotazione del gioco; altri valori la sostituiscono con una rotazione proporzionale",
-    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– tieni premuto il click dello stick destro (R3) e spingi lo stick su/giù per zoomare (Vista 1 sul gamepad)"
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– tieni premuto il click dello stick destro (R3) e spingi lo stick su/giù per zoomare (Vista 1 sul gamepad)",
+    "On entering combat, switch to:": "All'inizio del combattimento, passa a:",
+    "On leaving combat, switch to:": "Alla fine del combattimento, passa a:",
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– si attiva una volta all'inizio o alla fine del combattimento; una vista non salvata viene ignorata. Il combattimento spaziale (Rogue Trader) non è coperto."
   }
 }

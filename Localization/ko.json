@@ -80,6 +80,9 @@
     "gamepad deadzone: ": "게임패드 데드존: ",
     "gamepad turn speed: ": "게임패드 회전 속도: ",
     "– 1.0× leaves the game's own turn untouched; other values replace it with a proportional turn": "– 1.0×는 게임 자체 회전을 그대로 두고, 다른 값은 비례 회전으로 대체합니다",
-    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– 오른스틱 클릭(R3)을 누른 채 스틱을 위/아래로 밀면 줌(패드의 뷰 1)"
+    "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– 오른스틱 클릭(R3)을 누른 채 스틱을 위/아래로 밀면 줌(패드의 뷰 1)",
+    "On entering combat, switch to:": "전투 진입 시 전환:",
+    "On leaving combat, switch to:": "전투 종료 시 전환:",
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– 전투가 시작되거나 끝날 때 한 번만 작동합니다. 저장되지 않은 뷰는 건너뜁니다. 우주 전투(Rogue Trader)는 지원되지 않습니다."
   }
 }

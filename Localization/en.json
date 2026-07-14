@@ -79,6 +79,9 @@
     "near clip": "near clip",
     "far clip": "far clip",
     "solid walls  – stop walls/doors dissolving in front of the camera in this view": "solid walls  – stop walls/doors dissolving in front of the camera in this view",
-    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera"
+    "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera",
+    "On entering combat, switch to:": "On entering combat, switch to:",
+    "On leaving combat, switch to:": "On leaving combat, switch to:",
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered."
   }
 }
