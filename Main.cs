@@ -101,6 +101,7 @@ namespace ServoSkullCameraControls
         public float MouselookSensY = 0.7f;          // Y (pitch) sensitivity
         public bool MouselookInvertY = true;
         public bool MouselookCrosshair = true;
+        public bool MouselookHideOwnHover = true;   // in mouselook, hide the hover highlight/overtip on the controlled character (the centred cursor otherwise keeps them permanently lit)
         public int FreeCursorKey = (int)KeyCode.LeftShift;
 
         // --- Off-screen character markers (the edge portrait pointers) ---
@@ -605,6 +606,10 @@ namespace ServoSkullCameraControls
             // Auto view-change on combat enter/leave (polled edge on Player.IsInCombat).
             TickCombatAutoView();
 
+            // Hover-gate edge re-evaluation: clears/restores the controlled character's highlight when
+            // mouselook engages/releases (the game's hover pipeline is edge-driven and won't do it itself).
+            UnitHoverHighlight_Gate.EdgeTick();
+
             // Hold RT's occluder see-through off while a solid-walls view is active (restored when we leave it).
             UpdateOccluderClip();
         }
@@ -709,6 +714,14 @@ namespace ServoSkullCameraControls
 
         // Mouselook controls the camera only in plain surface gameplay: a flagged view is active,
         // nothing (UI, dialogue, cutscene, the UMM panel) needs the cursor, and the free key is up.
+        // Gate for UnitHoverHighlight_Gate: hide the hover highlight on the CONTROLLED character while
+        // mouselook is actually engaged (menus/map/etc. all read as not-engaged via MouselookEngaged, so
+        // hover is stock everywhere else). See the patch class for the mechanism and the safety argument.
+        internal static bool SuppressControlledUnitHover()
+        {
+            return settings != null && settings.MouselookHideOwnHover && MouselookEngaged();
+        }
+
         public static bool MouselookEngaged()
         {
             if (!Active || settings == null || !MouselookActive) return false;
@@ -1515,6 +1528,9 @@ namespace ServoSkullCameraControls
             GUILayout.BeginHorizontal();
             settings.MouselookInvertY = GUILayout.Toggle(settings.MouselookInvertY, L("invert Y"), GUILayout.Width(120f));
             settings.MouselookCrosshair = GUILayout.Toggle(settings.MouselookCrosshair, L("centre crosshair"), GUILayout.Width(170f));
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            settings.MouselookHideOwnHover = GUILayout.Toggle(settings.MouselookHideOwnHover, "     " + L("In mouselook, hide the hover highlight on the character you control"));
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
             GUILayout.Label("     " + L("hold-to-free-cursor:"), GUILayout.Width(190f));
@@ -3573,6 +3589,218 @@ namespace ServoSkullCameraControls
             AccessTools.Method("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer:UpdateLeftStickMovement");
         static bool Prepare() => TargetMethod() != null;
         static bool Prefix(object __instance) => !Main.TryPadFreeAimLeftStick(__instance);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // In mouselook the camera centres on the controlled character, so the cursor sits on them constantly
+    // and they carry a permanent hover glow + overtip (user report, WotR; identical on RT). MouseHighlighted
+    // drives both the glow and the hover overtip, so the gate sits on set_MouseHighlighted(bool) - THE HUB
+    // every writer flows through. Do not retarget to HandleHoverChange(bool): that was the first target and
+    // it failed in the field on both games, because two writers bypass it and call the setter directly -
+    // WotR routes PARTY-character world hover through UIUtilityUnit.CharacterHover (HandleHoverChange there
+    // only serves enemies and console/initiative-tracker paths: total failure), and RT's
+    // SurfaceMainInputLayer.TryInvokeUpdateHandle re-asserts the highlight per-frame during direct-control
+    // movement (highlight returned while moving). Both setters are large (dirty-check via SetValue,
+    // UpdateHighlight, SetUnitCursor, EventBus raise), so no JIT-inlining risk (the OnCinemachineUpdate
+    // trap), and skipping the TRUE write is clean while the FALSE (un-highlight) write is never skipped -
+    // nothing is stranded lit. Safety, verified in IL on both games: clicking never reads hover state
+    // (PointerController.Tick re-picks on mouse-down via SelectClickObject into m_MouseDownOn), and map
+    // objects/loot hover through different types (MapObjectView, DroppedLoot) - selection, movement and
+    // object hover stay stock. Scoped to the CONTROLLED character only: view.Data is reference-compared
+    // against SelectionManagerBase.Instance.SelectedUnit (present on both games; on WotR that reads
+    // Game.SelectionCharacter.SelectedUnit -> UnitReference.Value -> the same UnitEntityData instance the
+    // view's Data returns) - a deliberately hovered enemy still highlights normally. RT's per-frame
+    // re-assert means the prefix is warm during movement; it is a settings check plus three cached property
+    // reads. Setter is on Kingmaker.View.UnitEntityView (WotR) / Kingmaker.View.Mechanics.Entities.
+    // AbstractUnitEntityView (RT); bool binds positionally as __0 (WotR Harmony floor). Any resolution
+    // failure fails open to stock hover.
+    [HarmonyPatch]
+    static class UnitHoverHighlight_Gate
+    {
+        static MethodBase TargetMethod()
+        {
+            foreach (var tn in new[] { "Kingmaker.View.UnitEntityView", "Kingmaker.View.Mechanics.Entities.AbstractUnitEntityView" })
+            {
+                var t = AccessTools.TypeByName(tn);
+                var m = t == null ? null : AccessTools.Method(t, "set_MouseHighlighted", new[] { typeof(bool) });
+                if (m != null) return m;
+            }
+            return null;
+        }
+        static bool Prepare() => TargetMethod() != null;
+
+        static bool _resolved;
+        static System.Reflection.PropertyInfo _smInstance, _smSelected;
+        static System.Reflection.MethodInfo _viewDataGet;
+        static bool _selValueTried;
+        static System.Reflection.MethodInfo _selValueGet;   // RT: SelectedUnit is a UniRx ReactiveProperty<UnitEntity>; this unwraps .Value
+
+        // Binds get_Data (fallback get_EntityData) by walking the hierarchy one level at a time with
+        // DeclaredOnly + explicit empty parameter types. Both games declare a 'Data' property at MULTIPLE
+        // levels ('new'-hidden covariant re-declarations: EntityViewBase + UnitEntityView on WotR;
+        // EntityViewBase + MechanicEntityView + AbstractUnitEntityView on RT), so Type.GetProperty("Data")
+        // / AccessTools.Property throws AmbiguousMatchException - the silent killer of the first field
+        // build. A per-level, parameter-typed method lookup cannot be ambiguous. Most-derived wins; every
+        // re-declaration returns the same underlying instance, so the identity compare is unaffected.
+        static System.Reflection.MethodInfo FindGetterUpHierarchy(Type start, string propName)
+        {
+            for (var cur = start; cur != null; cur = cur.BaseType)
+            {
+                try
+                {
+                    var m = cur.GetMethod("get_" + propName,
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public |
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly,
+                        null, Type.EmptyTypes, null);
+                    if (m != null) return m;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        static bool Prefix(object __instance, bool __0)
+        {
+            if (!__0)
+            {
+                // The game is retracting a hover; if it is the one we were suppressing, forget the belief.
+                if (_gameHoverBelief != null && ReferenceEquals(__instance, _gameHoverBelief)) _gameHoverBelief = null;
+                return true;                                     // never skip the un-highlight
+            }
+            if (!Main.SuppressControlledUnitHover()) return true;
+            if (!IsControlledUnitView(__instance)) return true;
+            _gameHoverBelief = __instance as Component;          // the game believes this view is hovered; we are hiding it
+            return false;                                        // swallow the highlight for our own character
+        }
+
+        // --- Edge re-evaluation --------------------------------------------------------------------
+        // The game's hover pipeline is EDGE-driven (it writes MouseHighlighted only on hover
+        // transitions) while this gate is LEVEL-driven (mouselook engaged / released), so without help
+        // two seams show at the gate's own edges: releasing to free cursor with the pointer already on
+        // the character produced no highlight until the pointer exited and re-entered, and engaging
+        // mouselook with the character highlighted left it lit. Fix: mirror the game's hover belief and
+        // drive the setter on our own edges. While suppressing, every swallowed TRUE records the view as
+        // believed-hovered and every observed FALSE retracts it (see Prefix). On the ENGAGE edge, if the
+        // controlled view is currently highlighted, write FALSE (passes the prefix - only TRUE is ever
+        // swallowed) and record the belief. On the RELEASE edge, write TRUE back to a believed-hovered
+        // view that is still alive - materialising exactly the state the game already held, no raycast
+        // or hover re-derivation involved. Called once per frame from OnUpdate.
+        static bool _edgeLast;
+        static Component _gameHoverBelief;
+        static MethodBase _setter;
+        static System.Reflection.MethodInfo _mouseHighlightedGet, _selViewGet;
+
+        internal static void EdgeTick()
+        {
+            bool s = Main.SuppressControlledUnitHover();
+            if (s == _edgeLast) return;
+            _edgeLast = s;
+            try
+            {
+                if (_setter == null) _setter = TargetMethod();
+                if (_setter == null) return;
+                if (s)
+                {
+                    // Engage: clear a stale highlight on the controlled character and remember the belief.
+                    object view = ControlledView();
+                    var c = view as Component;
+                    if (c == null) return;                       // includes Unity-dead
+                    if (_mouseHighlightedGet == null)
+                        _mouseHighlightedGet = FindGetterUpHierarchy(_setter.DeclaringType, "MouseHighlighted");
+                    bool lit = false;
+                    if (_mouseHighlightedGet != null)
+                        try { lit = (bool)_mouseHighlightedGet.Invoke(view, null); } catch { }
+                    if (lit)
+                    {
+                        _gameHoverBelief = c;
+                        try { _setter.Invoke(view, new object[] { false }); } catch { }
+                    }
+                }
+                else
+                {
+                    // Release: restore the highlight the game believed in (hover never actually ended).
+                    var c = _gameHoverBelief;
+                    _gameHoverBelief = null;
+                    if (c != null)                               // Unity alive check
+                        try { _setter.Invoke(c, new object[] { true }); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        // Resolves the controlled unit's VIEW (selected unit -> unwrap ReactiveProperty if present ->
+        // View getter), all via the ambiguity-proof per-level walk. Null on any gap; callers fail open.
+        static object ControlledView()
+        {
+            try
+            {
+                if (_smInstance == null || _smSelected == null) { IsControlledUnitView(null); }
+                if (_smInstance == null || _smSelected == null) return null;
+                object smInst = _smInstance.GetValue(null, null);
+                if (smInst == null) return null;
+                object sel = _smSelected.GetValue(smInst, null);
+                if (sel == null) return null;
+                if (!_selValueTried) { _selValueTried = true; _selValueGet = FindGetterUpHierarchy(sel.GetType(), "Value"); }
+                if (_selValueGet != null) { try { var inner = _selValueGet.Invoke(sel, null); if (inner != null) sel = inner; } catch { } }
+                if (_selViewGet == null) _selViewGet = FindGetterUpHierarchy(sel.GetType(), "View");
+                return _selViewGet == null ? null : _selViewGet.Invoke(sel, null);
+            }
+            catch { return null; }
+        }
+
+        static bool IsControlledUnitView(object view)
+        {
+            try
+            {
+                if (!_resolved)
+                {
+                    _resolved = true;
+                    try
+                    {
+                        var sm = AccessTools.TypeByName("Kingmaker.UI.Selection.SelectionManagerBase")   // RT
+                              ?? AccessTools.TypeByName("SelectionManagerBase");                          // WotR (global namespace)
+                        if (sm != null)
+                        {
+                            try { _smInstance = AccessTools.Property(sm, "Instance"); } catch { }
+                            try { _smSelected = AccessTools.Property(sm, "SelectedUnit"); } catch { }
+                        }
+                    }
+                    catch { }
+                    var declaring = TargetMethod()?.DeclaringType;
+                    if (declaring != null)
+                        _viewDataGet = FindGetterUpHierarchy(declaring, "Data") ?? FindGetterUpHierarchy(declaring, "EntityData");
+                    if (_smInstance == null || _smSelected == null || _viewDataGet == null)
+                    {
+                        // one-shot by construction: this block is inside the !_resolved guard
+                        Main.Log?.Log("Hover gate: selection surface not resolved (smInstance=" + (_smInstance != null)
+                            + " smSelected=" + (_smSelected != null) + " viewData=" + (_viewDataGet != null)
+                            + ") - 'hide own hover highlight' is inert (stock hover everywhere).");
+                    }
+                }
+                if (_smInstance == null || _smSelected == null || _viewDataGet == null) return false;   // fail open
+                object smInst = _smInstance.GetValue(null, null);
+                if (smInst == null) return false;
+                object selected = _smSelected.GetValue(smInst, null);
+                if (selected == null) return false;
+                object data = _viewDataGet.Invoke(view, null);
+                if (data == null) return false;
+                if (ReferenceEquals(data, selected)) return true;          // WotR: SelectedUnit IS the unit data
+                // RT: SelectedUnit returns a UniRx ReactiveProperty<UnitEntity> wrapper - ToString renders the
+                // inner unit (so logs look identical) but reference equality is against the wrapper. Unwrap its
+                // Value getter (resolved with the same ambiguity-proof per-level walk) and compare the inner
+                // unit. On WotR this branch resolves no getter (or a non-matching one) and stays false - the
+                // direct compare above already handled the controlled case there.
+                if (!_selValueTried)
+                {
+                    _selValueTried = true;
+                    _selValueGet = FindGetterUpHierarchy(selected.GetType(), "Value");
+                }
+                if (_selValueGet == null) return false;
+                try { return ReferenceEquals(data, _selValueGet.Invoke(selected, null)); }
+                catch { return false; }
+            }
+            catch { return false; }                              // fail open: stock hover
+        }
     }
 
     // ------------------------------------------------------------------------------------------------

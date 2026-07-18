@@ -83,6 +83,7 @@
     "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– mantén pulsado el clic del stick derecho (R3) y empuja el stick arriba/abajo para hacer zoom (Vista 1 con mando)",
     "On entering combat, switch to:": "Al entrar en combate, cambiar a:",
     "On leaving combat, switch to:": "Al salir del combate, cambiar a:",
-    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– se activa una vez al empezar o terminar el combate; una vista no guardada se omite. El combate espacial (Rogue Trader) no está cubierto."
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– se activa una vez al empezar o terminar el combate; una vista no guardada se omite. El combate espacial (Rogue Trader) no está cubierto.",
+    "In mouselook, hide the hover highlight on the character you control": "En mouselook, ocultar el resaltado al pasar el cursor sobre el personaje que controlas"
   }
 }

@@ -83,6 +83,7 @@
     "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– 오른스틱 클릭(R3)을 누른 채 스틱을 위/아래로 밀면 줌(패드의 뷰 1)",
     "On entering combat, switch to:": "전투 진입 시 전환:",
     "On leaving combat, switch to:": "전투 종료 시 전환:",
-    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– 전투가 시작되거나 끝날 때 한 번만 작동합니다. 저장되지 않은 뷰는 건너뜁니다. 우주 전투(Rogue Trader)는 지원되지 않습니다."
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– 전투가 시작되거나 끝날 때 한 번만 작동합니다. 저장되지 않은 뷰는 건너뜁니다. 우주 전투(Rogue Trader)는 지원되지 않습니다.",
+    "In mouselook, hide the hover highlight on the character you control": "마우스룩 중에는 조종 중인 캐릭터의 호버 강조 표시를 숨김"
   }
 }

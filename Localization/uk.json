@@ -83,6 +83,7 @@
     "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– утримуйте натискання правого стика (R3) і відхиляйте стик вгору/вниз для зуму (Вид 1 на геймпаді)",
     "On entering combat, switch to:": "Під час входу в бій перемкнути на:",
     "On leaving combat, switch to:": "Після завершення бою перемкнути на:",
-    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– спрацьовує один раз на початку або в кінці бою; незбережений вигляд пропускається. Космічний бій (Rogue Trader) не підтримується."
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– спрацьовує один раз на початку або в кінці бою; незбережений вигляд пропускається. Космічний бій (Rogue Trader) не підтримується.",
+    "In mouselook, hide the hover highlight on the character you control": "У режимі mouselook приховувати підсвічування наведення на керованого персонажа"
   }
 }

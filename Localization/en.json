@@ -82,6 +82,7 @@
     "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera": "free-aim cursor (gamepad)  – in cursor control, the left stick moves the pointer in screen space instead of panning the camera",
     "On entering combat, switch to:": "On entering combat, switch to:",
     "On leaving combat, switch to:": "On leaving combat, switch to:",
-    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered."
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.",
+    "In mouselook, hide the hover highlight on the character you control": "In mouselook, hide the hover highlight on the character you control"
   }
 }

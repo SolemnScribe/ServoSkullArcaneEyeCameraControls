@@ -83,6 +83,7 @@
     "– hold the right-stick click (R3) and push the stick up/down to zoom (View 1 on a pad)": "– 右スティック押し込み（R3）を押しながらスティックを上下に倮すとズーム（パッドのビュー1）",
     "On entering combat, switch to:": "戦闘開始時に切り替え:",
     "On leaving combat, switch to:": "戦闘終了時に切り替え:",
-    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– 戦闘の開始または終了時に一度だけ作動します。保存されていないビューはスキップされます。宇宙戦闘（Rogue Trader）は対象外です。"
+    "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– 戦闘の開始または終了時に一度だけ作動します。保存されていないビューはスキップされます。宇宙戦闘（Rogue Trader）は対象外です。",
+    "In mouselook, hide the hover highlight on the character you control": "マウスルック中は、操作中のキャラクターのホバーハイライトを非表示"
   }
 }
