@@ -84,6 +84,15 @@
     "On entering combat, switch to:": "Beim Kampfbeginn wechseln zu:",
     "On leaving combat, switch to:": "Beim Kampfende wechseln zu:",
     "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– wird einmal beim Beginn bzw. Ende des Kampfes ausgelöst; eine nicht gespeicherte Ansicht wird übersprungen. Raumkampf (Rogue Trader) wird nicht berücksichtigt.",
-    "In mouselook, hide the hover highlight on the character you control": "Im Mouselook die Hover-Hervorhebung des gesteuerten Charakters ausblenden"
+    "In mouselook, hide the hover highlight on the character you control": "Im Mouselook die Hover-Hervorhebung des gesteuerten Charakters ausblenden",
+    "Steady dialogue volume (hold the audio listener during conversations)": "Gleichbleibende Dialoglautstärke (Audio-Listener während Gesprächen festhalten)",
+    "WASD pans the camera  – bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning": "WASD schwenkt die Kamera  – umgeht die WASD-Movement-Mod in dieser Ansicht, sodass die Tasten an das kameraeigene Schwenken des Spiels durchgereicht werden",
+    "On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)": "In Original schwenkt WASD die Kamera (umgeht die WASD-Movement-Mod)",
+    "swap move ↔ rotate keys  – the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched": "Bewegen ↔ Drehen tauschen  – die Kamera-Schwenktasten links/rechts und Drehtasten links/rechts tauschen die Plätze (gekreuzt: A/D drehen, Q/E schwenken bei Standardbelegung); die Tastenbelegung des Spiels bleibt unberührt",
+    "On Vanilla, swap move ↔ rotate keys (crossed; bindings untouched)": "In Original Bewegen ↔ Drehen tauschen (gekreuzt; Belegung unberührt)",
+    "Dialogue": "Dialog",
+    "framing, steady voice volume": "Bildkomposition, stabile Sprachlautstärke",
+    "the game's own camera": "die spieleigene Kamera",
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "Zoomgrenzen werden pro Ansicht festgelegt – im Block jeder Ansicht und oben unter Original."
   }
 }

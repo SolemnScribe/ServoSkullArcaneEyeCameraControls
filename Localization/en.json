@@ -83,6 +83,15 @@
     "On entering combat, switch to:": "On entering combat, switch to:",
     "On leaving combat, switch to:": "On leaving combat, switch to:",
     "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.",
-    "In mouselook, hide the hover highlight on the character you control": "In mouselook, hide the hover highlight on the character you control"
+    "In mouselook, hide the hover highlight on the character you control": "In mouselook, hide the hover highlight on the character you control",
+    "Steady dialogue volume (hold the audio listener during conversations)": "Steady dialogue volume (hold the audio listener during conversations)",
+    "WASD pans the camera  – bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning": "WASD pans the camera  – bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning",
+    "On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)": "On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)",
+    "swap move ↔ rotate keys  – the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched": "swap move ↔ rotate keys  – the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched",
+    "On Vanilla, swap move ↔ rotate keys (crossed; bindings untouched)": "On Vanilla, swap move ↔ rotate keys (crossed; bindings untouched)",
+    "Dialogue": "Dialogue",
+    "framing, steady voice volume": "framing, steady voice volume",
+    "the game's own camera": "the game's own camera",
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "Zoom limits are set per view – in each view's block and under Vanilla above."
   }
 }

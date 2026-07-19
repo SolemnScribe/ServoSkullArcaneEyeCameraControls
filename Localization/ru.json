@@ -84,6 +84,15 @@
     "On entering combat, switch to:": "При входе в бой переключаться на:",
     "On leaving combat, switch to:": "При выходе из боя переключаться на:",
     "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– срабатывает один раз в начале или конце боя; несохранённый вид пропускается. Космический бой (Rogue Trader) не поддерживается.",
-    "In mouselook, hide the hover highlight on the character you control": "В режиме mouselook скрывать подсветку наведения на управляемого персонажа"
+    "In mouselook, hide the hover highlight on the character you control": "В режиме mouselook скрывать подсветку наведения на управляемого персонажа",
+    "Steady dialogue volume (hold the audio listener during conversations)": "Стабильная громкость диалогов (фиксировать аудиослушателя во время разговоров)",
+    "WASD pans the camera  – bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning": "WASD перемещает камеру  – обходит мод WASD Movement в этом виде, чтобы клавиши работали как штатное перемещение камеры",
+    "On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)": "В режиме Оригинал WASD перемещает камеру (обход мода WASD Movement)",
+    "swap move ↔ rotate keys  – the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched": "поменять клавиши движения ↔ поворота  – клавиши сдвига камеры влево/вправо и поворота влево/вправо меняются местами (крест-накрест: A/D – поворот, Q/E – сдвиг при стандартных назначениях); назначения игры не затрагиваются",
+    "On Vanilla, swap move ↔ rotate keys (crossed; bindings untouched)": "В режиме Оригинал поменять движение ↔ поворот (крест-накрест; назначения не тронуты)",
+    "Dialogue": "Диалог",
+    "framing, steady voice volume": "кадрирование, стабильная громкость голоса",
+    "the game's own camera": "штатная камера игры",
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "Пределы зума задаются для каждого вида – в блоке вида и в разделе Оригинал выше."
   }
 }

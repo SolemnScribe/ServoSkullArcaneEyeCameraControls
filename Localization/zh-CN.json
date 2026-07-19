@@ -84,6 +84,15 @@
     "On entering combat, switch to:": "进入战斗时切换到：",
     "On leaving combat, switch to:": "离开战斗时切换到：",
     "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– 在战斗开始或结束时触发一次；未保存的视图将被跳过。不支持太空战斗（Rogue Trader）。",
-    "In mouselook, hide the hover highlight on the character you control": "鼠标视角下，隐藏所控角色的悬停高亮"
+    "In mouselook, hide the hover highlight on the character you control": "鼠标视角下，隐藏所控角色的悬停高亮",
+    "Steady dialogue volume (hold the audio listener during conversations)": "对话音量稳定（对话期间固定音频监听器）",
+    "WASD pans the camera  – bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning": "WASD 平移镜头  – 在此视图中绕过 WASD Movement 模组，按键回归游戏自身的镜头平移",
+    "On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)": "原版视图下 WASD 平移镜头（绕过 WASD Movement 模组）",
+    "swap move ↔ rotate keys  – the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched": "交换移动 ↔ 旋转按键  – 镜头左/右平移键与左/右旋转键交叉对调（默认键位下 A/D 旋转、Q/E 平移）；游戏按键设置保持不变",
+    "On Vanilla, swap move ↔ rotate keys (crossed; bindings untouched)": "原版视图下交换移动 ↔ 旋转按键（交叉；设置不变）",
+    "Dialogue": "对话",
+    "framing, steady voice volume": "构图、稳定语音音量",
+    "the game's own camera": "游戏自身的镜头",
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "缩放限制按视图设置 – 在各视图区块及上方“原版”中。"
   }
 }

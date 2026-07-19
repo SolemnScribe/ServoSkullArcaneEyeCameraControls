@@ -84,6 +84,15 @@
     "On entering combat, switch to:": "Ao entrar em combate, mudar para:",
     "On leaving combat, switch to:": "Ao sair do combate, mudar para:",
     "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– dispara uma vez quando o combate começa ou termina; uma vista não salva é ignorada. O combate espacial (Rogue Trader) não é coberto.",
-    "In mouselook, hide the hover highlight on the character you control": "No mouselook, ocultar o destaque ao passar o cursor sobre o personagem que você controla"
+    "In mouselook, hide the hover highlight on the character you control": "No mouselook, ocultar o destaque ao passar o cursor sobre o personagem que você controla",
+    "Steady dialogue volume (hold the audio listener during conversations)": "Volume de diálogo estável (fixar o ouvinte de áudio durante as conversas)",
+    "WASD pans the camera  – bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning": "WASD desloca a câmera  – ignora o mod WASD Movement nesta vista para que as teclas voltem ao deslocamento de câmera do próprio jogo",
+    "On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)": "Em Original, WASD desloca a câmera (ignora o mod WASD Movement)",
+    "swap move ↔ rotate keys  – the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched": "trocar teclas mover ↔ girar  – as teclas de deslocamento esquerda/direita e de rotação esquerda/direita trocam de lugar (cruzado: A/D giram, Q/E deslocam com as teclas padrão); as configurações do jogo não são alteradas",
+    "On Vanilla, swap move ↔ rotate keys (crossed; bindings untouched)": "Em Original, trocar mover ↔ girar (cruzado; configurações intactas)",
+    "Dialogue": "Diálogo",
+    "framing, steady voice volume": "enquadramento, volume de voz estável",
+    "the game's own camera": "a câmera do próprio jogo",
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "Os limites de zoom são definidos por vista – no bloco de cada vista e em Original, acima."
   }
 }

@@ -84,6 +84,15 @@
     "On entering combat, switch to:": "戦闘開始時に切り替え:",
     "On leaving combat, switch to:": "戦闘終了時に切り替え:",
     "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– 戦闘の開始または終了時に一度だけ作動します。保存されていないビューはスキップされます。宇宙戦闘（Rogue Trader）は対象外です。",
-    "In mouselook, hide the hover highlight on the character you control": "マウスルック中は、操作中のキャラクターのホバーハイライトを非表示"
+    "In mouselook, hide the hover highlight on the character you control": "マウスルック中は、操作中のキャラクターのホバーハイライトを非表示",
+    "Steady dialogue volume (hold the audio listener during conversations)": "会話中の音量を一定に（会話中はオーディオリスナーを固定）",
+    "WASD pans the camera  – bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning": "WASDでカメラをパン  – このビューではWASD Movementモッドをバイパスし、キーをゲーム本来のカメラパンに戻します",
+    "On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)": "バニラではWASDでカメラをパン（WASD Movementモッドをバイパス）",
+    "swap move ↔ rotate keys  – the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched": "移動 ↔ 回転キーを入れ替え  – カメラの左右パンキーと左右回転キーを交差で入れ替え（既定ではA/Dが回転、Q/Eがパン）。ゲームのキー設定は変更されません",
+    "On Vanilla, swap move ↔ rotate keys (crossed; bindings untouched)": "バニラで移動 ↔ 回転キーを入れ替え（交差、設定はそのまま）",
+    "Dialogue": "会話",
+    "framing, steady voice volume": "フレーミングと音量安定",
+    "the game's own camera": "ゲーム本来のカメラ",
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "ズーム限界はビューごとに設定します（各ビューのブロックと上のバニラ内）。"
   }
 }

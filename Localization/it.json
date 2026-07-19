@@ -84,6 +84,15 @@
     "On entering combat, switch to:": "All'inizio del combattimento, passa a:",
     "On leaving combat, switch to:": "Alla fine del combattimento, passa a:",
     "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– si attiva una volta all'inizio o alla fine del combattimento; una vista non salvata viene ignorata. Il combattimento spaziale (Rogue Trader) non è coperto.",
-    "In mouselook, hide the hover highlight on the character you control": "In mouselook, nascondi l'evidenziazione al passaggio del cursore sul personaggio che controlli"
+    "In mouselook, hide the hover highlight on the character you control": "In mouselook, nascondi l'evidenziazione al passaggio del cursore sul personaggio che controlli",
+    "Steady dialogue volume (hold the audio listener during conversations)": "Volume dei dialoghi costante (blocca l'ascoltatore audio durante le conversazioni)",
+    "WASD pans the camera  – bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning": "WASD sposta la telecamera  – ignora la mod WASD Movement in questa vista così i tasti tornano allo scorrimento telecamera del gioco",
+    "On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)": "In Originale, WASD sposta la telecamera (ignora la mod WASD Movement)",
+    "swap move ↔ rotate keys  – the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched": "scambia i tasti sposta ↔ ruota  – i tasti di scorrimento sinistra/destra e di rotazione sinistra/destra si scambiano (incrociato: A/D ruotano, Q/E scorrono con i tasti predefiniti); le assegnazioni del gioco restano intatte",
+    "On Vanilla, swap move ↔ rotate keys (crossed; bindings untouched)": "In Originale, scambia sposta ↔ ruota (incrociato; assegnazioni intatte)",
+    "Dialogue": "Dialogo",
+    "framing, steady voice volume": "inquadratura, volume voce costante",
+    "the game's own camera": "la telecamera del gioco",
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "I limiti dello zoom si impostano per vista – nel blocco di ogni vista e sotto Originale qui sopra."
   }
 }

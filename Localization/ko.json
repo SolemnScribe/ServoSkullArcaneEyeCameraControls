@@ -84,6 +84,15 @@
     "On entering combat, switch to:": "전투 진입 시 전환:",
     "On leaving combat, switch to:": "전투 종료 시 전환:",
     "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– 전투가 시작되거나 끝날 때 한 번만 작동합니다. 저장되지 않은 뷰는 건너뜁니다. 우주 전투(Rogue Trader)는 지원되지 않습니다.",
-    "In mouselook, hide the hover highlight on the character you control": "마우스룩 중에는 조종 중인 캐릭터의 호버 강조 표시를 숨김"
+    "In mouselook, hide the hover highlight on the character you control": "마우스룩 중에는 조종 중인 캐릭터의 호버 강조 표시를 숨김",
+    "Steady dialogue volume (hold the audio listener during conversations)": "대화 음량 유지 (대화 중 오디오 리스너 고정)",
+    "WASD pans the camera  – bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning": "WASD로 카메라 이동  – 이 뷰에서는 WASD Movement 모드를 우회하여 키가 게임 자체 카메라 이동으로 전달됩니다",
+    "On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)": "바닐라에서는 WASD로 카메라 이동 (WASD Movement 모드 우회)",
+    "swap move ↔ rotate keys  – the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched": "이동 ↔ 회전 키 교체  – 카메라 좌/우 이동 키와 좌/우 회전 키가 교차 교체됩니다(기본 키 기준 A/D 회전, Q/E 이동). 게임 키 설정은 그대로 유지됩니다",
+    "On Vanilla, swap move ↔ rotate keys (crossed; bindings untouched)": "바닐라에서 이동 ↔ 회전 키 교체 (교차, 설정 유지)",
+    "Dialogue": "대화",
+    "framing, steady voice volume": "프레이밍, 음성 볼륨 유지",
+    "the game's own camera": "게임 기본 카메라",
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "줌 한계는 뷰별로 설정합니다 – 각 뷰 블록과 위의 바닐라 항목에서."
   }
 }

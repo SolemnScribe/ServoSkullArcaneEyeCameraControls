@@ -39,6 +39,11 @@ namespace ServoSkullCameraControls
         public bool  DialogZoomEnabled = false; // pin a fixed zoom in Full-tactical dialogue for this view (off = the view's own zoom carries through)
         public float DialogZoom = 0.4f;       // the pinned dialogue zoom (scroll position 0..1) when DialogZoomEnabled
         public bool PadFreeAimCursor = false; // gamepad cursor control: drive the on-screen pointer with the left stick instead of flying the camera, leaving the camera fixed (RT surface exploration, cursor mode only)
+        public bool WasdPan = false;          // bypass the WASD Movement mod on this view: its input read is idled (via its own zero-input path) so WASD falls through to the game's native camera-pan bindings
+        public bool SwapPanRotateKeys = false; // crossed swap of the game's camera pan-left/right and rotate-left/right keys on this view (evaluation-time only; the Controls screen and saved bindings are untouched)
+        public bool  ZoomLimitsEnabled = true; // per-view zoom-limit extension (the native scroll travels within these)
+        public float ZoomOutFactor = 1.3f;     // 1..3, pull back further (class default = the mild View 2 / Vanilla preset; View 1's initializer overrides)
+        public float ZoomInFactor  = 2f;       // 1..10, get much closer
     }
 
     public class Settings : UnityModManager.ModSettings
@@ -47,9 +52,15 @@ namespace ServoSkullCameraControls
         public bool FramingEnabled = true;
         public bool FramingPauseInCutscenes = false;
         public DialogFramingMode DialogFraming = DialogFramingMode.Tactical;   // behaviour during RT Dialog mode (see enum)
+        public bool DialogueListenerPin = true;   // hold the Wwise listener at the stock camera pose during conversations, so voice volume doesn't change with the mod's views
         public float DialogVerticalOffset = 1.3f;   // LEGACY: the old single global dialogue height; kept only so it still deserializes for the one-time migration into each view's DialogHeight. No longer shown or used at runtime.
         public bool  DialogFramingMigrated = false;  // set once DialogVerticalOffset has been copied into the per-view DialogHeight fields
         public bool  PadFreeAimMigrated = false;      // set once the new per-view PadFreeAimCursor default has been seeded (View 1 on)
+        public bool  VanillaWasdPan = true;           // WASD Movement bypass on the Vanilla view (no CameraView object exists for Vanilla, hence a top-level flag)
+        public bool  WasdPanMigrated = false;         // set once the per-view WasdPan defaults have been seeded (View 2 on; View 1 stays off)
+        public bool  VanillaSwapPanRotateKeys = false; // crossed pan<->rotate key swap on the Vanilla view
+        public bool  KeySwapMigrated = false;          // set once View 1's SwapPanRotateKeys default (on) has been seeded
+        public bool  KeyBindCrossResetDone = false;    // set once the one-time crossed-bindings detection/reset has run (see CameraKeySwap.TickMigrate)
 
         // --- Automatic view change on combat enter/leave (views stored as _activeView ints: 0 Vanilla, 1, 2) ---
         // Independent of the toggle-cycle checkboxes: combat may force a view that is not in the manual ring.
@@ -63,15 +74,21 @@ namespace ServoSkullCameraControls
         public float MinPitchAngle = 15f;       // flattest the drag may reach
         public float MaxPitchAngle = 89f;       // steepest the drag may reach
 
-        // --- Zoom limits (native scroll travels within these) ---
+        // --- Zoom limits ---
+        // Per-view since 1.38.0 (each CameraView has its own trio; Vanilla's is below). The three
+        // globals are RETIRED from the UI and kept only as the one-time migration source.
         public bool ZoomLimitsEnabled = true;
-        public bool ZoomPauseInCutscenes = true;
-        public float ZoomOutFactor = 2.4f;      // 1..3, pull back further
-        public float ZoomInFactor = 4f;         // 1..6+, get much closer
+        public bool ZoomPauseInCutscenes = true;         // still global: cutscene semantics aren't per-view
+        public float ZoomOutFactor = 2.4f;
+        public float ZoomInFactor = 4f;
+        public bool  VanillaZoomLimitsEnabled = true;    // Vanilla's own trio (no CameraView object exists for Vanilla)
+        public float VanillaZoomOutFactor = 1.3f;
+        public float VanillaZoomInFactor  = 2f;
+        public bool  ZoomLimitsMigrated = false;         // set once the per-view zoom-limit values have been seeded
 
         // --- Presets ---
         // Defaults seeded from a tuned setup: View 1 close over-the-shoulder (mouselook + dolly), View 2 wide tactical.
-        public CameraView View1 = new CameraView { IsSet = true, Pitch = 37.3301f, Zoom = 0.4f, NearClip = 1.5f, NearClipEnabled = false, Mouselook = true, RotateSpeedMult = 0.1f, PivotHeight = 1.9f, Shoulder = 0.4f, Dolly = 25.5f, LiveFollow = false, SolidWalls = true, PadFreeAimCursor = true };
+        public CameraView View1 = new CameraView { IsSet = true, Pitch = 37.3301f, Zoom = 0.4f, NearClip = 1.5f, NearClipEnabled = false, Mouselook = true, RotateSpeedMult = 0.1f, PivotHeight = 1.9f, Shoulder = 0.4f, Dolly = 25.5f, LiveFollow = false, SolidWalls = true, PadFreeAimCursor = true, ZoomOutFactor = 2.4f, ZoomInFactor = 4f };
         public CameraView View2 = new CameraView { IsSet = true, Pitch = -1.05517578f, Zoom = 0.3f, NearClip = 5f, NearClipEnabled = true, FarClip = 4000f, FarClipEnabled = true, Mouselook = false, RotateSpeedMult = 1.5f, PivotHeight = 0f, Shoulder = 0.4f, Dolly = 15f, LiveFollow = false, SolidWalls = false };
         public int SetView1Key = (int)KeyCode.Keypad7;
         public int SetView2Key = (int)KeyCode.Keypad9;
@@ -412,6 +429,28 @@ namespace ServoSkullCameraControls
                 settings.PadFreeAimMigrated = true;
                 settings.Save(modEntry);
             }
+            if (!settings.WasdPanMigrated)   // one-time: seed the WASD Movement bypass defaults (Vanilla on via initializer, View 2 on, View 1 off)
+            {
+                settings.View2.WasdPan = true;
+                settings.WasdPanMigrated = true;
+                settings.Save(modEntry);
+            }
+            if (!settings.KeySwapMigrated)   // one-time: seed the crossed pan<->rotate key swap default (View 1 on; View 2 and Vanilla off)
+            {
+                settings.View1.SwapPanRotateKeys = true;
+                settings.KeySwapMigrated = true;
+                settings.Save(modEntry);
+            }
+            if (!settings.ZoomLimitsMigrated)   // one-time: zoom limits went per-view. View 1 inherits the user's
+            {                                    // existing global values; View 2 and Vanilla keep the new mild
+                settings.View1.ZoomLimitsEnabled = settings.ZoomLimitsEnabled;   // class defaults (1.3x out, 2x in),
+                settings.View1.ZoomOutFactor = settings.ZoomOutFactor;           // deliberately closer to stock.
+                settings.View1.ZoomInFactor  = settings.ZoomInFactor;
+                settings.View2.ZoomLimitsEnabled  = settings.ZoomLimitsEnabled;
+                settings.VanillaZoomLimitsEnabled = settings.ZoomLimitsEnabled;
+                settings.ZoomLimitsMigrated = true;
+                settings.Save(modEntry);
+            }
             try { Localization.Init(modEntry); }   // pick the language file matching the game's current locale
             catch (Exception eLoc) { Log?.Error("Load: Localization.Init threw (continuing in English): " + eLoc); }
             try { Compat.Init(); }                  // detect RT vs WotR reflection targets (logs the UI flavour)
@@ -479,6 +518,13 @@ namespace ServoSkullCameraControls
             if (Active) ToyBoxProbe.EnforceCtrlElevationOff();   // force ToyBox's floor-clipping camera-elevation option off while we drive the camera
 
             if (settings == null) return;
+
+            // Environment-resolution ticks run BEFORE the Active/rig gate so they resolve at the main
+            // menu and their detect/give-up logs appear early - the 1.38.0 field lesson: below the gate
+            // they only start once a rig exists, and their absence is indistinguishable from failure.
+            WasdBypass.TickInstall();
+            CameraKeySwap.Tick();
+
             if (_bindingTarget == 4) { ScanGamepadBind(); return; }   // armed for a gamepad button: IMGUI key events can't see JoystickButtons, so poll them here
             if (_bindingTarget != 0) return;
 
@@ -610,8 +656,68 @@ namespace ServoSkullCameraControls
             // mouselook engages/releases (the game's hover pipeline is edge-driven and won't do it itself).
             UnitHoverHighlight_Gate.EdgeTick();
 
+
             // Hold RT's occluder see-through off while a solid-walls view is active (restored when we leave it).
             UpdateOccluderClip();
+        }
+
+        // Total world-space delta the rig postfix applied to the camera rig this frame (framing offsets +
+        // dolly + live-follow anchor + the dialogue base pin). Zero whenever no offset is applied. Read by
+        // DialogueListenerPin_Patch to reconstruct the game's own camera pose ("pre-mod") when it captures
+        // the held listener position.
+        internal static Vector3 LastFocusOffsetWorld;
+
+        // Gate for the dialogue listener pin: option on, a mod view active, and the mod's own dialogue
+        // predicate - the same pair DialogFraming keys on (UIGate.HasDialog covers RT's dialogue surface,
+        // InDialogMode covers WotR's GameModeType.Dialog).
+        internal static bool DialogueListenerPinActive()
+        {
+            return Active && settings != null && settings.DialogueListenerPin && _activeView != 0
+                && (UIGate.HasDialog() || CameraRig_UpdateInternal_Patch.InDialogMode());
+        }
+
+        // Gate for the WASD Movement bypass: does the ACTIVE view want native WASD camera pan?
+        // Vanilla / no view reads the top-level flag (default on); views read their own (View 1 default
+        // off, View 2 seeded on). False whenever the mod is off, so the third-party mod runs untouched.
+        internal static bool WasdBypassActive()
+        {
+            if (!Active || settings == null) return false;
+            if (_activeView == 1) return settings.View1 != null && settings.View1.WasdPan;
+            if (_activeView == 2) return settings.View2 != null && settings.View2.WasdPan;
+            return settings.VanillaWasdPan;
+        }
+
+        // Gate for the crossed pan<->rotate key swap: does the ACTIVE view want it? Vanilla / no view
+        // reads the top-level flag (default off); View 1 is seeded on, View 2 defaults off.
+        internal static bool KeySwapActive()
+        {
+            if (!Active || settings == null) return false;
+            if (_activeView == 1) return settings.View1 != null && settings.View1.SwapPanRotateKeys;
+            if (_activeView == 2) return settings.View2 != null && settings.View2.SwapPanRotateKeys;
+            return settings.VanillaSwapPanRotateKeys;
+        }
+
+        // Active-view zoom-limit trio (per-view since 1.38.0; Vanilla has its own top-level set).
+        internal static bool ActiveZoomLimitsEnabled()
+        {
+            if (settings == null) return false;
+            if (_activeView == 1) return settings.View1 != null && settings.View1.ZoomLimitsEnabled;
+            if (_activeView == 2) return settings.View2 != null && settings.View2.ZoomLimitsEnabled;
+            return settings.VanillaZoomLimitsEnabled;
+        }
+        internal static float ActiveZoomOutFactor()
+        {
+            if (settings == null) return 1f;
+            if (_activeView == 1 && settings.View1 != null) return settings.View1.ZoomOutFactor;
+            if (_activeView == 2 && settings.View2 != null) return settings.View2.ZoomOutFactor;
+            return settings.VanillaZoomOutFactor;
+        }
+        internal static float ActiveZoomInFactor()
+        {
+            if (settings == null) return 1f;
+            if (_activeView == 1 && settings.View1 != null) return settings.View1.ZoomInFactor;
+            if (_activeView == 2 && settings.View2 != null) return settings.View2.ZoomInFactor;
+            return settings.VanillaZoomInFactor;
         }
 
         // Combat enter/leave -> switch to the user's chosen view. Polls Player.IsInCombat (party-level, present
@@ -797,10 +903,16 @@ namespace ServoSkullCameraControls
             try { if (CursorLocked) AssertCursorHidden(); } catch { }
         }
 
-        // Strip any non-ours prefix off CameraZoom.TickZoom - that is ToyBox's FOV
+        // Strip any non-ours PREFIX off CameraZoom.TickZoom - that was ToyBox 1.x's FOV
         // override, which otherwise ignores the FovMin/FovMax our zoom range sets.
         // ToyBox's rig patches (Mouse3 pitch / Ctrl+Mouse3 elevation) are deliberately
         // left in place: RT has no native pitch, so we rely on ToyBox for it.
+        // ToyBox 2.0 note: its camera patches are TRANSPILERS (gated live by GeneralSettings
+        // fields), so this prefix strip finds nothing there - correct BY DESIGN. Do NOT
+        // extend this to transpilers or other methods: the TickRotate transpiler IS the
+        // Mouse3 pitch our mouselook depends on. 2.0's FOV feature patches the
+        // PhysicalZoomMin/Max GETTERS instead (multiplies our range rather than overwriting
+        // it), so the 1.x conflict this strip existed for is structurally gone there.
         // Retries briefly so it is load-order independent.
         static void SuppressForeignCameraPatches()
         {
@@ -1411,8 +1523,10 @@ namespace ServoSkullCameraControls
         }
 
         // ---- GUI ----
-        // Foldout state for the per-view setting blocks (UI only; defaults open, resets per session).
-        static bool _view1Expanded = true, _view2Expanded = true;
+        // Foldout state for the collapsible setting sections (UI only; ALL collapsed by default per
+        // Tim's call - less overwhelming on first open; resets per session).
+        static bool _view1Expanded = false, _view2Expanded = false;
+        static bool _vanillaExpanded = false, _dialogueExpanded = false;
 
         static void OnGUI(UnityModManager.ModEntry modEntry)
         {
@@ -1481,6 +1595,7 @@ namespace ServoSkullCameraControls
             // --- Per-view blocks: everything specific to a view lives in one place ---
             DrawViewBlock(L("View 1"), settings.View1, 1, ref _view1Expanded);
             DrawViewBlock(L("View 2"), settings.View2, 2, ref _view2Expanded);
+            DrawVanillaBlock();
 
             GUILayout.Space(14f);
 
@@ -1491,10 +1606,20 @@ namespace ServoSkullCameraControls
             GUILayout.EndHorizontal();
             GUILayout.Label("     " + L("Ctrl+scroll live-tunes the active view's pivot height; Ctrl+Shift+scroll its dolly. Pivot is world-up, so it holds through turns and never jumps when mouselook toggles."));
             GUILayout.BeginHorizontal();
-            GUILayout.Label("     " + L("In dialogue:"), GUILayout.Width(150f));
-            settings.DialogFraming = (DialogFramingMode)GUILayout.Toolbar((int)settings.DialogFraming, new[] { L("Off"), L("Lift only"), L("Full tactical") }, GUILayout.Width(360f));
+            if (GUILayout.Button((_dialogueExpanded ? "\u25bc  " : "\u25b6  ") + L("Dialogue"), GUILayout.Width(110f))) _dialogueExpanded = !_dialogueExpanded;
+            GUILayout.Label(L("framing, steady voice volume"), GUILayout.Width(240f));
             GUILayout.EndHorizontal();
-            GUILayout.Label("     " + L("dialogue framing \u2013 Off hands off to the game; Lift only keeps a gentle raise with no zoom; Full tactical holds an over-the-shoulder framing while the game still frames the speakers left/right. Set the Full-tactical height (and an optional fixed zoom) per view in each view's block above."));
+            if (_dialogueExpanded)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("     " + L("In dialogue:"), GUILayout.Width(150f));
+                settings.DialogFraming = (DialogFramingMode)GUILayout.Toolbar((int)settings.DialogFraming, new[] { L("Off"), L("Lift only"), L("Full tactical") }, GUILayout.Width(360f));
+                GUILayout.EndHorizontal();
+                GUILayout.Label("     " + L("dialogue framing \u2013 Off hands off to the game; Lift only keeps a gentle raise with no zoom; Full tactical holds an over-the-shoulder framing while the game still frames the speakers left/right. Set the Full-tactical height (and an optional fixed zoom) per view in each view's block above."));
+                GUILayout.BeginHorizontal();
+                settings.DialogueListenerPin = GUILayout.Toggle(settings.DialogueListenerPin, "     " + L("Steady dialogue volume (hold the audio listener during conversations)"));
+                GUILayout.EndHorizontal();
+            }
 
             GUILayout.Space(14f);
 
@@ -1507,15 +1632,11 @@ namespace ServoSkullCameraControls
 
             GUILayout.Space(8f);
 
-            // --- Zoom limits (global) ---
+            // --- Zoom limits: the sliders live per view since 1.38.0 (each view's block + Vanilla) ---
             GUILayout.BeginHorizontal();
-            settings.ZoomLimitsEnabled = GUILayout.Toggle(settings.ZoomLimitsEnabled, "  " + L("Extend zoom limits  (scroll)"), GUILayout.Width(250f));
+            GUILayout.Label("  " + L("Zoom limits are set per view \u2013 in each view's block and under Vanilla above."), GUILayout.Width(430f));
             settings.ZoomPauseInCutscenes = GUILayout.Toggle(settings.ZoomPauseInCutscenes, L("pause in cutscenes"));
             GUILayout.EndHorizontal();
-            GUILayout.Label("     " + L("zoom-out  \u00d7") + settings.ZoomOutFactor.ToString("0.0") + "   " + L("\u2013 pull back further"));
-            settings.ZoomOutFactor = Snap(GUILayout.HorizontalSlider(settings.ZoomOutFactor, ZoomOutMin, ZoomOutMax), ZoomStep);
-            GUILayout.Label("     " + L("zoom-in  \u00d7") + settings.ZoomInFactor.ToString("0.0") + "   " + L("\u2013 get much closer"));
-            settings.ZoomInFactor = Snap(GUILayout.HorizontalSlider(settings.ZoomInFactor, ZoomInMin, ZoomInMax), ZoomStep);
 
             GUILayout.Space(8f);
 
@@ -1550,14 +1671,41 @@ namespace ServoSkullCameraControls
             {
                 settings.MinPitchAngle = 5f;
                 settings.MaxPitchAngle = 89f;
-                settings.ZoomOutFactor = 1f;
-                settings.ZoomInFactor = 4f;
+                settings.View1.ZoomOutFactor = 2.4f;  settings.View1.ZoomInFactor = 4f;
+                settings.View2.ZoomOutFactor = 1.3f;  settings.View2.ZoomInFactor = 2f;
+                settings.VanillaZoomOutFactor = 1.3f; settings.VanillaZoomInFactor = 2f;
             }
 
             GUILayout.Space(12f);
             GUILayout.Label(L("Scripted (hard-bound) camera shots are always left alone, regardless of these settings."));
 
             GUILayout.EndVertical();
+        }
+
+        // The Vanilla section: the game's own camera, plus every mod behaviour that applies while on it.
+        static void DrawVanillaBlock()
+        {
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button((_vanillaExpanded ? "\u25bc  " : "\u25b6  ") + L("Vanilla"), GUILayout.Width(110f))) _vanillaExpanded = !_vanillaExpanded;
+            GUILayout.Label(L("the game's own camera"), GUILayout.Width(240f));
+            GUILayout.EndHorizontal();
+            if (!_vanillaExpanded) return;
+
+            GUILayout.BeginHorizontal();
+            settings.VanillaWasdPan = GUILayout.Toggle(settings.VanillaWasdPan, "  " + L("On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)"));
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            settings.VanillaSwapPanRotateKeys = GUILayout.Toggle(settings.VanillaSwapPanRotateKeys, "  " + L("On Vanilla, swap move \u2194 rotate keys (crossed; bindings untouched)"));
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            settings.VanillaZoomLimitsEnabled = GUILayout.Toggle(settings.VanillaZoomLimitsEnabled, "  " + L("Extend zoom limits  (scroll)"), GUILayout.Width(250f));
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     " + L("zoom-out  \u00d7") + settings.VanillaZoomOutFactor.ToString("0.0") + "   " + L("\u2013 pull back further"));
+            settings.VanillaZoomOutFactor = Snap(GUILayout.HorizontalSlider(settings.VanillaZoomOutFactor, ZoomOutMin, ZoomOutMax), ZoomStep);
+            GUILayout.Label("     " + L("zoom-in  \u00d7") + settings.VanillaZoomInFactor.ToString("0.0") + "   " + L("\u2013 get much closer"));
+            settings.VanillaZoomInFactor = Snap(GUILayout.HorizontalSlider(settings.VanillaZoomInFactor, ZoomInMin, ZoomInMax), ZoomStep);
+            GUILayout.Space(6f);
         }
 
         // Draws one view's collapsible block: a foldout header plus, when open, every setting that
@@ -1662,6 +1810,17 @@ namespace ServoSkullCameraControls
 
             // Gamepad free-aim cursor for this view (RT surface, cursor control only).
             v.PadFreeAimCursor = GUILayout.Toggle(v.PadFreeAimCursor, "  " + L("free-aim cursor (gamepad)  \u2013 in cursor control, the left stick moves the pointer in screen space instead of panning the camera"));
+            v.WasdPan = GUILayout.Toggle(v.WasdPan, "  " + L("WASD pans the camera  \u2013 bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning"));
+            v.SwapPanRotateKeys = GUILayout.Toggle(v.SwapPanRotateKeys, "  " + L("swap move \u2194 rotate keys  \u2013 the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched"));
+
+            // Per-view zoom limits (sensible values depend on this view's dolly).
+            GUILayout.BeginHorizontal();
+            v.ZoomLimitsEnabled = GUILayout.Toggle(v.ZoomLimitsEnabled, "  " + L("Extend zoom limits  (scroll)"), GUILayout.Width(250f));
+            GUILayout.EndHorizontal();
+            GUILayout.Label("     " + L("zoom-out  \u00d7") + v.ZoomOutFactor.ToString("0.0") + "   " + L("\u2013 pull back further"));
+            v.ZoomOutFactor = Snap(GUILayout.HorizontalSlider(v.ZoomOutFactor, ZoomOutMin, ZoomOutMax), ZoomStep);
+            GUILayout.Label("     " + L("zoom-in  \u00d7") + v.ZoomInFactor.ToString("0.0") + "   " + L("\u2013 get much closer"));
+            v.ZoomInFactor = Snap(GUILayout.HorizontalSlider(v.ZoomInFactor, ZoomInMin, ZoomInMax), ZoomStep);
 
             GUILayout.Space(10f);
         }
@@ -1901,8 +2060,8 @@ namespace ServoSkullCameraControls
             if (zoom == null) return;
             var tz = Traverse.Create(zoom);
 
-            float outF = restoreDefault ? 1f : Mathf.Clamp(Main.settings.ZoomOutFactor, Main.ZoomOutMin, Main.ZoomOutMax);
-            float inF  = restoreDefault ? 1f : Mathf.Clamp(Main.settings.ZoomInFactor,  Main.ZoomInMin,  Main.ZoomInMax);
+            float outF = restoreDefault ? 1f : Mathf.Clamp(Main.ActiveZoomOutFactor(), Main.ZoomOutMin, Main.ZoomOutMax);
+            float inF  = restoreDefault ? 1f : Mathf.Clamp(Main.ActiveZoomInFactor(),  Main.ZoomInMin,  Main.ZoomInMax);
 
             // FOV mode: wider FOV = more zoomed out, narrower = more zoomed in.
             if (!float.IsNaN(_fovMax)) SetMember(tz, "FovMax", Mathf.Clamp(_fovMax * outF, 5f, 110f));
@@ -2481,7 +2640,7 @@ namespace ServoSkullCameraControls
                 LastHardBind = hardBind;   // exposed for OnUpdate's occluder gate, which runs outside this postfix
 
                 bool needCut = (s.FramingEnabled && s.FramingPauseInCutscenes)
-                            || (s.ZoomLimitsEnabled && s.ZoomPauseInCutscenes);
+                            || (Main.ActiveZoomLimitsEnabled() && s.ZoomPauseInCutscenes);
                 bool inCut = needCut && InCutscene();
 
                 // While no preset is active and we're in ordinary gameplay (not a scripted/map/cutscene shot),
@@ -2492,7 +2651,7 @@ namespace ServoSkullCameraControls
                 // Zoom: maintained every frame; reverted when off, hard-bound, during an in-dialogue scripted
                 // shot (CameraCutsceneActive is dialogue-only, so this doesn't touch pure cutscenes), and in pure
                 // cutscenes only when the pause-in-cutscenes toggle is on - that control stays authoritative there.
-                bool zoomRevert = !s.ZoomLimitsEnabled || hardBind
+                bool zoomRevert = !Main.ActiveZoomLimitsEnabled() || hardBind
                                 || CutsceneCameraGate.CameraCutsceneActive()
                                 || (s.ZoomPauseInCutscenes && inCut);
                 ZoomLimits.Apply(__instance, restoreDefault: zoomRevert);
@@ -2712,7 +2871,7 @@ namespace ServoSkullCameraControls
                     && (!hardBind || framingDialogExempt)
                     && !(s.FramingPauseInCutscenes && inCut && !framingDialogExempt)
                     && !CutsceneCameraGate.CameraCutsceneActive();   // stand the offset down during scripted camera shots
-                if (!applyOffset) { _hasClean = false; return; }
+                if (!applyOffset) { _hasClean = false; Main.LastFocusOffsetWorld = Vector3.zero; return; }
 
                 Transform rigT = comp.transform;
                 _cleanPos = rigT.position;
@@ -2782,6 +2941,7 @@ namespace ServoSkullCameraControls
                     try { finalBase.y = t.Field("m_TargetPosition").GetValue<Vector3>().y; } catch { }
                 }
                 rigT.position = finalBase + offset;
+                Main.LastFocusOffsetWorld = rigT.position - _cleanPos;   // total delta vs the game's own pose (read by the dialogue listener pin)
             }
             catch (Exception e)
             {
@@ -3137,32 +3297,95 @@ namespace ServoSkullCameraControls
         }
     }
 
-    // Read-only probe of ToyBox's "Ctrl + Mouse3 Drag To Adjust Camera Elevation" toggle
-    // (ToyBox.Settings.toggleCameraElevation, reached via EnhancedCamera.Settings). That option
-    // breaks follow-to-unit on load and pans from a map origin, so we surface a warning when it
-    // is on. Fails safe to null (ToyBox absent or field renamed) - no warning, no error.
+    // Probe of ToyBox's floor-clipping camera-elevation drag, DUAL-SHAPE since the ToyBox 2.0 rewrite:
+    //   1.x: ToyBox.EnhancedCamera.Settings (static) -> ToyBox.Settings.toggleCameraElevation
+    //   2.0: ToyBox.Infrastructure.GeneralSettings.Settings (static) -> EnableDragCameraElevation
+    //        ("CTRL + Mouse3 to adjust camera height"; 2.0's patches are transpilers whose injected code
+    //        checks these GeneralSettings fields LIVE per call, so forcing the field off is immediate -
+    //        the same semantics the 1.x enforce always had).
+    // Resolution retries briefly (load-order independence), and for 2.0 waits until ToyBox reports
+    // itself initialised before touching GeneralSettings.Settings - its getter lazily creates the
+    // settings JSON, and calling it before ToyBox's own Load has set its paths could misfire. Neither
+    // shape found (ToyBox absent, or a future reshape) => permanently inert: no warning, no error.
+    // CameraElevationOffsetFeature (2.0's separate STATIC height offset) is deliberately left alone -
+    // its flag lives on the feature instance, and it has not been shown to fight our rig control.
     static class ToyBoxProbe
     {
-        static bool _probed;
-        static PropertyInfo _settingsProp;   // EnhancedCamera.Settings (static)
-        static FieldInfo _elevField;          // ToyBox.Settings.toggleCameraElevation
+        static int _shape;                    // 0 = none/unresolved, 1 = ToyBox 1.x, 2 = ToyBox 2.0
+        static bool _resolveDone;
+        static float _nextTry = 2f;
+        static int _attempts;
+        static PropertyInfo _settingsProp;    // shape 1: EnhancedCamera.Settings; shape 2: GeneralSettings.Settings
+        static FieldInfo _elevField;          // shape 1: toggleCameraElevation;   shape 2: EnableDragCameraElevation
 
-        static void Probe()
+        static void TickProbe()
         {
-            if (_probed) return;
-            _probed = true;
-            var ec = AccessTools.TypeByName("ToyBox.EnhancedCamera");
-            if (ec != null) _settingsProp = AccessTools.Property(ec, "Settings");
-            var st = AccessTools.TypeByName("ToyBox.Settings");
-            if (st != null) _elevField = AccessTools.Field(st, "toggleCameraElevation");
+            if (_resolveDone || Time.unscaledTime < _nextTry) return;
+            _attempts++;
+            try
+            {
+                // Shape 1 (ToyBox 1.x)
+                var ec = AccessTools.TypeByName("ToyBox.EnhancedCamera");
+                var stA = AccessTools.TypeByName("ToyBox.Settings");
+                if (ec != null && stA != null)
+                {
+                    var p = AccessTools.Property(ec, "Settings");
+                    var f = AccessTools.Field(stA, "toggleCameraElevation");
+                    if (p != null && f != null)
+                    {
+                        _settingsProp = p; _elevField = f; _shape = 1; _resolveDone = true;
+                        Main.Log?.Log("ToyBox 1.x detected - camera-elevation guard active.");
+                        return;
+                    }
+                }
+
+                // Shape 2 (ToyBox 2.0 rewrite)
+                var gs = AccessTools.TypeByName("ToyBox.Infrastructure.GeneralSettings");
+                if (gs != null)
+                {
+                    // Only touch Settings once ToyBox says it is up (lazy JSON creation hazard).
+                    bool ready = false;
+                    try
+                    {
+                        var tbMain = AccessTools.TypeByName("ToyBox.Main");
+                        var init = tbMain == null ? null : AccessTools.Property(tbMain, "SuccessfullyInitialized");
+                        if (init != null) ready = init.GetValue(null, null) is bool b && b;
+                        else
+                        {
+                            var me = tbMain == null ? null : AccessTools.Field(tbMain, "ModEntry");
+                            ready = me != null && me.GetValue(null) != null;
+                        }
+                    }
+                    catch { }
+                    if (ready)
+                    {
+                        var p = AccessTools.Property(gs, "Settings");
+                        var f = AccessTools.Field(gs, "EnableDragCameraElevation");
+                        if (p != null && f != null)
+                        {
+                            _settingsProp = p; _elevField = f; _shape = 2; _resolveDone = true;
+                            Main.Log?.Log("ToyBox 2.0 detected - camera-elevation guard active (\"CTRL + Mouse3 to adjust camera height\").");
+                        }
+                        else
+                        {
+                            _resolveDone = true;   // GeneralSettings exists but the members moved again: stay inert
+                        }
+                        return;
+                    }
+                    // ToyBox 2.0 present but not initialised yet - keep retrying inside the window.
+                }
+            }
+            catch { }
+            if (_attempts >= 10) _resolveDone = true;   // ToyBox absent (or never initialised): permanently inert
+            else _nextTry = Time.unscaledTime + 2f;
         }
 
         public static bool? CtrlElevationOn()
         {
             try
             {
-                Probe();
-                if (_settingsProp == null || _elevField == null) return null;
+                TickProbe();
+                if (_shape == 0 || _settingsProp == null || _elevField == null) return null;
                 var s = _settingsProp.GetValue(null);
                 if (s == null) return null;
                 return _elevField.GetValue(s) is bool b ? b : (bool?)null;
@@ -3170,18 +3393,19 @@ namespace ServoSkullCameraControls
             catch { return null; }
         }
 
-        // Auto-disable: ToyBox's "Ctrl + Mouse3 Drag To Adjust Camera Elevation" makes the camera load at a map
-        // origin and clip through the floor while moving under our camera control - a game-breaking combination,
-        // so we force it off whenever we're active rather than only warning. Re-asserted each frame so it stays
-        // off even if ToyBox reloads its settings; if the user disables our mod the option is theirs again. Logs
-        // once. Fails safe to a no-op (ToyBox absent, field renamed, or not writable).
+        // Auto-disable: the Ctrl+Mouse3 elevation drag makes the camera load at a map origin and clip
+        // through the floor while moving under our camera control - a game-breaking combination, so we
+        // force it off whenever we're active rather than only warning. Re-asserted each frame so it stays
+        // off even if ToyBox reloads its settings; if the user disables our mod the option is theirs
+        // again. Logs once, naming the option as the installed ToyBox generation calls it. Fails safe to
+        // a no-op (ToyBox absent, members renamed, or not writable).
         static bool _loggedElevDisable;
         public static void EnforceCtrlElevationOff()
         {
             try
             {
-                Probe();
-                if (_settingsProp == null || _elevField == null) return;
+                TickProbe();
+                if (_shape == 0 || _settingsProp == null || _elevField == null) return;
                 var s = _settingsProp.GetValue(null);
                 if (s == null) return;
                 if (_elevField.GetValue(s) is bool b && b)
@@ -3189,7 +3413,8 @@ namespace ServoSkullCameraControls
                     _elevField.SetValue(s, false);
                     if (!_loggedElevDisable)
                     {
-                        Main.Log?.Log("ToyBox: disabled \"Ctrl + Mouse3 Drag To Adjust Camera Elevation\" - it clips the camera through the floor under our camera control.");
+                        string opt = _shape == 2 ? "CTRL + Mouse3 to adjust camera height" : "Ctrl + Mouse3 Drag To Adjust Camera Elevation";
+                        Main.Log?.Log("ToyBox: disabled \"" + opt + "\" - it clips the camera through the floor under our camera control.");
                         _loggedElevDisable = true;
                     }
                 }
@@ -3800,6 +4025,706 @@ namespace ServoSkullCameraControls
                 catch { return false; }
             }
             catch { return false; }                              // fail open: stock hover
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // WASD Movement bypass (third-party UMM mod, Id "WASDMovement" by ADDB - keyboard character movement
+    // for RT). That mod has NO Harmony patches: it polls the keyboard from its UMM OnUpdate and issues
+    // move commands, and its ReadKeyboardInput(bool) carries a built-in off-ramp - argument false =>
+    // returns Vector2.zero, and OnUpdate's zero-input path runs the mod's OWN stop housekeeping
+    // (Commands.InterruptMove, m_MovedLastFrame/m_LastOverride). The bypass therefore just forces that
+    // argument false while the active view wants native WASD camera pan: the mod idles through its
+    // authored path, an in-progress move stops via its own code, and the keys fall through to the
+    // game's camera-pan bindings (which the mod never suppressed - it has no patches to do so; the
+    // user's game bindings must be intact for pan to appear). Keyboard-only mod => structurally cannot
+    // affect the gamepad features. INSTALLED LAZILY from OnUpdate: UMM load order can put WASDMovement
+    // after this mod, so a load-time TypeByName would miss it - retried a few times, then assumed
+    // absent (silent; also the WotR case, whose WASD mods are different projects).
+    static class WasdBypass
+    {
+        static bool _done, _installed;
+        static float _retryAt = 2f;   // give UMM time to finish loading later mods
+        static int _attempts;
+
+        public static void TickInstall()
+        {
+            if (_done || _installed) return;
+            if (Time.unscaledTime < _retryAt) return;
+            _attempts++;
+            // Cache-proof type resolution, three ladders (Harmony's TypeByName can snapshot the assembly
+            // list on first use, and UMM loads WASDMovement AFTER us): (A) name-matched assembly GetType;
+            // (B) GetType on EVERY assembly regardless of name; (C) full GetTypes scan (survives partial
+            // ReflectionTypeLoadExceptions). Statuses feed the give-up line so one field log names any
+            // dead link.
+            bool asmSeen = false, viaAsm = false, viaAny = false, viaScan = false;
+            Type t = null;
+            try
+            {
+                var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+                foreach (var asm in assemblies)
+                {
+                    try
+                    {
+                        if (asm.GetName().Name == "WASDMovement")
+                        {
+                            asmSeen = true;
+                            t = asm.GetType("WASDMovement.Main");
+                            if (t != null) { viaAsm = true; break; }
+                        }
+                    }
+                    catch { }
+                }
+                if (t == null)
+                {
+                    foreach (var asm in assemblies)
+                    {
+                        try { t = asm.GetType("WASDMovement.Main"); if (t != null) { viaAny = true; break; } }
+                        catch { }
+                    }
+                }
+                if (t == null)
+                {
+                    foreach (var asm in assemblies)
+                    {
+                        Type[] types = null;
+                        try { types = asm.GetTypes(); }
+                        catch (ReflectionTypeLoadException rtle) { types = rtle.Types; }
+                        catch { continue; }
+                        if (types == null) continue;
+                        foreach (var ty in types)
+                            if (ty != null && ty.FullName == "WASDMovement.Main") { t = ty; viaScan = true; break; }
+                        if (t != null) break;
+                    }
+                }
+            }
+            catch { }
+            var m = t == null ? null : AccessTools.Method(t, "ReadKeyboardInput", new[] { typeof(bool) });
+            if (m == null && t != null)
+            {
+                // typed lookup missed: fall back to any single-parameter method of that name
+                foreach (var cand in t.GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+                    if (cand.Name == "ReadKeyboardInput" && cand.GetParameters().Length == 1) { m = cand; break; }
+            }
+            if (m == null)
+            {
+                if (_attempts >= 8)
+                {
+                    _done = true;
+                    Main.Log?.Log("WASD Movement bypass unavailable. Links: asmSeen=" + asmSeen + " typeViaAsm=" + viaAsm
+                        + " typeViaAny=" + viaAny + " typeViaScan=" + viaScan + " type=" + (t != null) + " method=" + (m != null) + ".");
+                }
+                else _retryAt = Time.unscaledTime + 2f;
+                return;
+            }
+            try
+            {
+                Main.HarmonyInst.Patch(m, prefix: new HarmonyMethod(AccessTools.Method(typeof(WasdBypass), nameof(Prefix))));
+                _installed = true;
+                Main.Log?.Log("WASD Movement detected - per-view 'WASD pans the camera' bypass active.");
+                TryGateSuppressor(t);
+            }
+            catch (Exception e)
+            {
+                _done = true;
+                Main.Log?.Error("WASD Movement bypass could not be installed: " + e.Message);
+            }
+        }
+
+        // WASD Movement also ships a Harmony POSTFIX on Binding.InputMatched (Patches.InputMatched)
+        // that force-fails the four camera-PAN bindings whenever WalkMode != None, the binding's key is
+        // one of its movement keys (hardcoded WASD defaults), and the game is unpaused - decoded from
+        // IL: WalkMode/m_KeyCodes/m_Names/CanProcessInput, all AND, then __result = false. That is why
+        // WASD pan stays dead under the bypass (the bypass idles the MOVEMENT, not the suppressor), and
+        // why everything pans while PAUSED (CanProcessInput gates it). The gate below skips their
+        // suppressor precisely while the active view hands WASD to camera panning; with the bypass off
+        // the suppressor runs as its author intended (View 1: prevents pan double-action while the mod
+        // moves the character).
+        static bool _gateInstalled;
+        static void TryGateSuppressor(Type mainType)
+        {
+            if (_gateInstalled) return;
+            try
+            {
+                var pt = mainType?.Assembly.GetType("WASDMovement.Patches");
+                var pm = pt == null ? null : AccessTools.Method(pt, "InputMatched");
+                if (pm == null) return;                          // shape changed or absent: nothing to gate
+                Main.HarmonyInst.Patch(pm, prefix: new HarmonyMethod(AccessTools.Method(typeof(WasdBypass), nameof(SuppressorGate))));
+                _gateInstalled = true;
+                Main.Log?.Log("WASD Movement camera-pan suppressor gated: inactive while the active view hands WASD to camera panning.");
+            }
+            catch (Exception e) { Main.Log?.Error("WASD suppressor gate failed: " + e.Message); }
+        }
+
+        static bool SuppressorGate() { return !Main.WasdBypassActive(); }
+
+        static bool _engagedLogged;
+        static bool Prefix(ref Vector2 __result)
+        {
+            if (!Main.WasdBypassActive()) return true;
+            __result = Vector2.zero;   // skip the read entirely; the caller's own zero-input handling (its stop housekeeping) runs identically
+            if (!_engagedLogged)
+            {
+                _engagedLogged = true;
+                Main.Log?.Log("WASD bypass engaged: the active view hands WASD to the game's camera panning.");
+            }
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // Crossed pan<->rotate key swap (RT). The game's camera keys are UISettingsEntityKeyBinding assets
+    // (UISettingsRoot.Instance.Controls sheet: CameraLeft/CameraRight/CameraRotateLeft/CameraRotateRight),
+    // registered as named Bindings whose per-frame evaluation is Binding.InputMatched() - called by
+    // KeyboardAccess.Tick AND re-checked by OnCallbackByBinding, so one prefix covers both sites. When
+    // the active view's SwapPanRotateKeys is on, InputMatched on one of the four returns the CROSSED
+    // partner's evaluation instead (CameraLeft <-> CameraRotateRight, CameraRight <-> CameraRotateLeft -
+    // the mapping requested; Up/Down untouched), behind a re-entrancy guard since the partner's
+    // evaluation re-enters the patched method. Nothing is written: the Controls screen, saved bindings
+    // and GameMode gating stay the game's own, and releasing the swap is ceasing to reroute. Binding
+    // names are harvested at runtime from the entity assets' Unity names (the same route the WASD
+    // Movement mod uses), resolved lazily from OnUpdate so the hot prefix is a flag check + dictionary
+    // probe. RT-only by Prepare (WotR's settings model differs).
+    //
+    // TickMigrate additionally performs a ONE-TIME persistent reset (the mod's first and only settings
+    // write, explicitly requested): users of older versions who manually created this exact crossed
+    // scheme (MoveL=Q, MoveR=E, RotL=D, RotR=A, primary slot, no modifiers - detected against the stock
+    // defaults A/D/Q/E) would find the new swap doubling their swap. On an exact match the four entities
+    // are reset to blueprint defaults through the game's own SettingsController.ResetToDefault ->
+    // RenewRegisteredBindings -> SaveAll, and View 1's seeded swap reproduces their scheme - identical
+    // effective controls before and after. Any other configuration (defaults, straight swaps, unrelated
+    // customs) is deliberately untouched, and the check never runs twice (KeyBindCrossResetDone), so
+    // later deliberate rebinds are the user's forever.
+    [HarmonyPatch]
+    static class CameraKeySwap_Patch
+    {
+        static MethodBase TargetMethod()
+        {
+            var ka = AccessTools.TypeByName("Kingmaker.UI.InputSystems.KeyboardAccess");
+            var gbn = ka == null ? null : AccessTools.Method(ka, "GetBindingByName");
+            var bindingType = gbn?.ReturnType;                       // the (global-namespace) Binding type, resolved robustly
+            return bindingType == null ? null : AccessTools.Method(bindingType, "InputMatched", Type.EmptyTypes);
+        }
+        static bool Prepare() => Compat.Ui == Compat.UiKind.RT && TargetMethod() != null;
+
+        static bool _guard;
+
+        static bool Prefix(object __instance, ref bool __result)
+        {
+            if (_guard || !CameraKeySwap.Ready) return true;
+            if (!Main.KeySwapActive()) return true;
+            string partner = CameraKeySwap.PartnerOf(__instance);
+            if (partner == null) return true;                        // not one of the four camera keys
+            object pb = CameraKeySwap.GetBindingByName(partner);
+            if (pb == null) return true;                             // fail open
+            _guard = true;
+            try { __result = CameraKeySwap.EvalInputMatched(pb); }
+            catch { return true; }
+            finally { _guard = false; }
+            return false;
+        }
+    }
+
+    static class CameraKeySwap
+    {
+        internal static bool Ready;
+        static bool _resolveDone, _migrateDone;
+        static float _nextTry = 2f;
+        static int _attempts;
+
+        static PropertyInfo _bindingName;                             // Binding.Name (property...)
+        static FieldInfo _bindingNameField;                           // ...or field, per the §7.6 lesson
+        static MethodInfo _inputMatched;                              // Binding.InputMatched()
+        static PropertyInfo _kaInstance;                              // KeyboardAccess.Instance
+        static MethodInfo _getBindingByName;                          // KeyboardAccess.GetBindingByName(string)
+        static readonly System.Collections.Generic.Dictionary<string, string> _partner = new System.Collections.Generic.Dictionary<string, string>();
+        static string[] _names;                                       // resolved binding names (same order as _fieldOrder)
+        static readonly string[] _fieldOrder = { "CameraLeft", "CameraRight", "CameraRotateLeft", "CameraRotateRight" };
+
+        public static void Tick()
+        {
+            if (Compat.Ui != Compat.UiKind.RT) return;
+            if (!_resolveDone) TickResolve();
+            if (Ready && !_inventoryLogged) LogInputMatchedPatchInventory();
+            if (_resolveDone && Ready && !_migrateDone) TickMigrate();
+        }
+
+        // One-shot diagnostic (support-grade, permanent): enumerate every Harmony patch sitting on
+        // Binding.InputMatched, with owners. Settles definitively which mods contest the camera-key
+        // evaluation chokepoint - the 1.38.0 field investigations needed exactly this visibility.
+        static bool _inventoryLogged;
+        static void LogInputMatchedPatchInventory()
+        {
+            _inventoryLogged = true;
+            try
+            {
+                if (_inputMatched == null) return;
+                var pi = HarmonyLib.Harmony.GetPatchInfo(_inputMatched);
+                if (pi == null) { Main.Log?.Log("InputMatched patch inventory: none."); return; }
+                Main.Log?.Log("InputMatched patch inventory - prefixes: [" + FmtPatches(pi.Prefixes)
+                    + "] postfixes: [" + FmtPatches(pi.Postfixes)
+                    + "] transpilers: [" + FmtPatches(pi.Transpilers) + "].");
+            }
+            catch (Exception e) { Main.Log?.Log("InputMatched patch inventory unavailable: " + e.Message); }
+        }
+
+        static string FmtPatches(System.Collections.Generic.IEnumerable<HarmonyLib.Patch> ps)
+        {
+            var parts = new System.Collections.Generic.List<string>();
+            if (ps != null)
+                foreach (var p in ps)
+                {
+                    try { parts.Add(p.owner + ":" + p.PatchMethod.DeclaringType.Name + "." + p.PatchMethod.Name); }
+                    catch { parts.Add("?"); }
+                }
+            return parts.Count == 0 ? "-" : string.Join(", ", parts.ToArray());
+        }
+
+        static void TickResolve()
+        {
+            if (Time.unscaledTime < _nextTry) return;
+            bool kaOk = false, gbnOk = false, nameOk = false, imOk = false, kaInstOk = false, rootInstOk = false, controlsOk = false, sheetOk = false;
+            try
+            {
+                var ka = AccessTools.TypeByName("Kingmaker.UI.InputSystems.KeyboardAccess");
+                if (ka != null)
+                {
+                    kaOk = true;
+                    if (_kaInstance == null) { try { _kaInstance = AccessTools.Property(ka, "Instance"); } catch { } }
+                    if (_getBindingByName == null)
+                    {
+                        foreach (var m in ka.GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static))
+                        {
+                            if (m.Name != "GetBindingByName") continue;
+                            var ps = m.GetParameters();
+                            if (ps.Length == 1 && ps[0].ParameterType == typeof(string)) { _getBindingByName = m; break; }
+                        }
+                    }
+                    gbnOk = _getBindingByName != null;
+                    var bindingType = _getBindingByName?.ReturnType;
+                    if (bindingType != null)
+                    {
+                        // Field-or-property adaptive: the §7.6 lesson, applied pre-emptively.
+                        if (_bindingName == null) { try { _bindingName = AccessTools.Property(bindingType, "Name"); } catch { } }
+                        if (_bindingName == null && _bindingNameField == null) { try { _bindingNameField = AccessTools.Field(bindingType, "Name"); } catch { } }
+                        if (_inputMatched == null) { try { _inputMatched = AccessTools.Method(bindingType, "InputMatched", Type.EmptyTypes); } catch { } }
+                    }
+                    nameOk = _bindingName != null || _bindingNameField != null;
+                    imOk = _inputMatched != null;
+                    try { kaInstOk = _kaInstance != null && _kaInstance.GetValue(null, null) != null; } catch { }
+                }
+
+                // Sheet ladder A: UISettingsRoot.Instance -> Controls -> the UIKeybindGeneralSettings member.
+                object sheet = null;
+                var root = AccessTools.TypeByName("Kingmaker.UI.Models.SettingsUI.UISettingsRoot");
+                if (root != null)
+                {
+                    object rootInst = null;
+                    try { rootInst = AccessTools.Property(root, "Instance")?.GetValue(null, null); } catch { }
+                    if (rootInst == null) { try { rootInst = AccessTools.Field(root, "m_Instance")?.GetValue(null); } catch { } }
+                    rootInstOk = rootInst != null;
+                    object controls = null;
+                    if (rootInst != null) { try { controls = Traverse.Create(rootInst).Field("Controls").GetValue<object>(); } catch { } }
+                    controlsOk = controls != null;
+                    if (controls != null)
+                    {
+                        if (controls.GetType().Name == "UIKeybindGeneralSettings") sheet = controls;
+                        else
+                        {
+                            foreach (var f in controls.GetType().GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+                                if (f.FieldType.Name == "UIKeybindGeneralSettings") { sheet = f.GetValue(controls); break; }
+                        }
+                    }
+                }
+                // Sheet ladder B: the sheet is a ScriptableObject asset - find it directly even when
+                // UISettingsRoot.Instance is still null (it can stay unset until the settings UI opens).
+                if (sheet == null)
+                {
+                    try
+                    {
+                        var sheetType = AccessTools.TypeByName("Kingmaker.UI.Models.SettingsUI.UISettingsSheet.UIKeybindGeneralSettings");
+                        if (sheetType != null)
+                        {
+                            var all = UnityEngine.Resources.FindObjectsOfTypeAll(sheetType);
+                            if (all != null && all.Length > 0) sheet = all[0];
+                        }
+                    }
+                    catch { }
+                }
+                sheetOk = sheet != null;
+
+                // Ladder C: the registered bindings THEMSELVES. In-game the camera controls are live, so
+                // the four bindings exist in KeyboardAccess under their entity asset names - which follow
+                // the field names. If all four literals resolve, the swap can run without the sheet at
+                // all (the sheet is then only needed by the one-time migrate, which waits separately).
+                if (sheet == null && gbnOk && kaInstOk && nameOk && imOk)
+                {
+                    bool allFour = true;
+                    for (int i = 0; i < 4; i++)
+                        if (GetBindingByName(_fieldOrder[i]) == null) { allFour = false; break; }
+                    if (allFour)
+                    {
+                        _partner.Clear();
+                        _partner[_fieldOrder[0]] = _fieldOrder[2];   // CameraLeft        fires on RotateLeft's key  (Q)
+                        _partner[_fieldOrder[1]] = _fieldOrder[3];   // CameraRight       fires on RotateRight's key (E)
+                        _partner[_fieldOrder[2]] = _fieldOrder[1];   // CameraRotateLeft  fires on CameraRight's key (D)
+                        _partner[_fieldOrder[3]] = _fieldOrder[0];   // CameraRotateRight fires on CameraLeft's key  (A)
+                        _names = (string[])_fieldOrder.Clone();
+                        Ready = true;
+                        _resolveDone = true;
+                        Main.Log?.Log("Key swap: resolved via registered binding names (" + string.Join(", ", _fieldOrder) + ").");
+                        return;
+                    }
+                }
+
+                if (sheet != null && nameOk && imOk && gbnOk)
+                {
+                    var ents = new object[4];
+                    var names = new string[4];
+                    bool ok = true;
+                    for (int i = 0; i < 4; i++)
+                    {
+                        var fe = sheet.GetType().GetField(_fieldOrder[i], System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                        var ent = fe?.GetValue(sheet) as UnityEngine.Object;
+                        if (ent == null) { ok = false; break; }
+                        ents[i] = ent; names[i] = ent.name;
+                    }
+                    if (ok)
+                    {
+                        _names = names;
+                        _partner.Clear();
+                        // partner[X] = the binding whose KEY X listens to under the swap. Pan takes the
+                        // rotate keys STRAIGHT (Q pans left, E pans right); rotation takes the pan keys
+                        // CROSSED (A rotates right, D rotates left) - the requested scheme. The symmetric
+                        // pairing shipped first inverted the pan keys (Q panned right) - field-caught.
+                        _partner[names[0]] = names[2];   // CameraLeft        fires on CameraRotateLeft's key  (Q)
+                        _partner[names[1]] = names[3];   // CameraRight       fires on CameraRotateRight's key (E)
+                        _partner[names[2]] = names[1];   // CameraRotateLeft  fires on CameraRight's key       (D)
+                        _partner[names[3]] = names[0];   // CameraRotateRight fires on CameraLeft's key        (A)
+                        Ready = true;
+                        _resolveDone = true;
+                        Main.Log?.Log("Key swap: camera pan/rotate bindings resolved (" + string.Join(", ", names) + ").");
+                        return;
+                    }
+                }
+            }
+            catch (Exception e) { Main.Log?.Error("Key swap: resolve failed: " + e.Message); }
+
+            // Attempts only count once the GAME WORLD exists (the 1.38.0 field lesson: at the main menu
+            // the Controls field and the sheet asset are simply not loaded yet, and burning the window
+            // there is a self-inflicted timeout). Before that: retry quietly. The give-up line names
+            // every link so one field log diagnoses any genuinely dead one.
+            if (Main.CurrentRig != null) _attempts++;
+            if (_attempts >= 10)
+            {
+                _resolveDone = true;
+                Main.Log?.Log("Key swap: keybinding surface not resolved - swap inert. Links: ka=" + kaOk
+                    + " gbn=" + gbnOk + " name=" + nameOk + " inputMatched=" + imOk + " kaInstance=" + kaInstOk
+                    + " rootInstance=" + rootInstOk + " controls=" + controlsOk + " sheet=" + sheetOk
+                    + " world=" + (Main.CurrentRig != null) + ".");
+            }
+            else _nextTry = Time.unscaledTime + 2f;
+        }
+
+        internal static string PartnerOf(object binding)
+        {
+            try
+            {
+                string n = _bindingName != null ? _bindingName.GetValue(binding, null) as string
+                                                : _bindingNameField?.GetValue(binding) as string;
+                if (n == null) return null;
+                string p;
+                return _partner.TryGetValue(n, out p) ? p : null;
+            }
+            catch { return null; }
+        }
+
+        internal static object GetBindingByName(string name)
+        {
+            try
+            {
+                object ka = _kaInstance.GetValue(null, null);
+                return ka == null ? null : _getBindingByName.Invoke(ka, new object[] { name });
+            }
+            catch { return null; }
+        }
+
+        internal static bool EvalInputMatched(object binding)
+        {
+            return (bool)_inputMatched.Invoke(binding, null);
+        }
+
+        // ---- One-time crossed-bindings reset --------------------------------------------------------
+        // Sheet-free since the field iterations: the UI settings sheet proved unreliable to obtain (its
+        // asset only loads with the settings UI, and even then inconsistently), so DETECTION reads the
+        // four LIVE Binding objects (Key + modifier fields - available the moment the swap resolves) and
+        // the RESET writes each data-layer entity (Kingmaker.Settings.SettingsRoot.Controls.Keybindings.
+        // General.Camera*) back to its own DefaultValue, persists via SettingsController.SaveAll, and
+        // live-syncs the four Binding keys so the session reflects it immediately. The flag is only set
+        // after the four keys were actually READ (exact-cross or not) or after a failed reset attempt is
+        // deliberately left for retry next session - never burned silently on an unread state.
+        static float _migNextTry;
+        static int _migTries;
+        static MethodInfo _bKeyGet, _bKeySet;
+        static FieldInfo _bCtrl, _bAlt, _bShift;
+
+        static readonly KeyCode[] _stockDefaults = { KeyCode.A, KeyCode.D, KeyCode.Q, KeyCode.E };   // CameraLeft, CameraRight, CameraRotateLeft, CameraRotateRight
+
+        static void TickMigrate()
+        {
+            if (Main.settings == null || Main.settings.KeyBindCrossResetDone) { _migrateDone = true; return; }
+            if (Time.unscaledTime < _migNextTry) return;
+            _migNextTry = Time.unscaledTime + 5f;
+            if (++_migTries > 60) { _migrateDone = true; return; }   // ~5 min of quiet retries this session, then next session
+
+            try
+            {
+                if (_names == null || _getBindingByName == null) return;
+
+                // Live bindings + accessors.
+                var bindings = new object[4];
+                for (int i = 0; i < 4; i++)
+                {
+                    bindings[i] = GetBindingByName(_names[i]);
+                    if (bindings[i] == null) return;              // not registered yet: retry
+                }
+                var bt = bindings[0].GetType();
+                if (_bKeyGet == null) { try { _bKeyGet = AccessTools.Method(bt, "get_Key"); } catch { } }
+                if (_bKeySet == null) { try { _bKeySet = AccessTools.Method(bt, "set_Key"); } catch { } }
+                if (_bCtrl == null) { try { _bCtrl = AccessTools.Field(bt, "IsCtrlDown"); _bAlt = AccessTools.Field(bt, "IsAltDown"); _bShift = AccessTools.Field(bt, "IsShiftDown"); } catch { } }
+                if (_bKeyGet == null) { _migrateDone = true; Main.Log?.Log("Key swap: one-time bindings check could not read binding keys - leaving bindings as they are."); return; }
+
+                var keys = new KeyCode[4];
+                bool anyModifier = false;
+                for (int i = 0; i < 4; i++)
+                {
+                    object k = _bKeyGet.Invoke(bindings[i], null);
+                    if (!(k is KeyCode kc) || kc == KeyCode.None) return;   // not populated yet: retry
+                    keys[i] = kc;
+                    try
+                    {
+                        if (_bCtrl != null && ((bool)_bCtrl.GetValue(bindings[i]) || (bool)_bAlt.GetValue(bindings[i]) || (bool)_bShift.GetValue(bindings[i])))
+                            anyModifier = true;
+                    }
+                    catch { }
+                }
+
+                // Exact crossed pattern only: MoveL=Q, MoveR=E, RotL=D, RotR=A, no modifiers.
+                bool crossed = !anyModifier
+                    && keys[0] == KeyCode.Q && keys[1] == KeyCode.E
+                    && keys[2] == KeyCode.D && keys[3] == KeyCode.A;
+                if (!crossed)
+                {
+                    Main.settings.KeyBindCrossResetDone = true;   // read and judged: defaults or an unrelated scheme - never look again
+                    _migrateDone = true;
+                    return;
+                }
+
+                // Reset: data-layer entities back to their own defaults, persist, live-sync.
+                bool persisted = ResetDataLayerToDefaults();
+                for (int i = 0; i < 4; i++)
+                {
+                    try
+                    {
+                        if (_bKeySet != null) _bKeySet.Invoke(bindings[i], new object[] { _stockDefaults[i] });
+                        _bCtrl?.SetValue(bindings[i], false);
+                        _bAlt?.SetValue(bindings[i], false);
+                        _bShift?.SetValue(bindings[i], false);
+                    }
+                    catch { }
+                }
+                _migrateDone = true;
+                if (persisted)
+                {
+                    Main.settings.KeyBindCrossResetDone = true;
+                    Main.Log?.Log("Key swap: your manually crossed camera move/rotate bindings were restored to defaults (one time only) - View 1's key swap now provides the crossed scheme. Rebind freely; this will not run again.");
+                }
+                else
+                {
+                    // Live keys are corrected for this session; persistence failed, so leave the flag
+                    // unset and try again next launch rather than stranding a half-applied state.
+                    Main.Log?.Log("Key swap: crossed bindings detected and corrected for this session, but saving defaults failed - will retry on next launch.");
+                }
+            }
+            catch (Exception e)
+            {
+                _migrateDone = true;   // one attempt per session, never spam
+                Main.Log?.Error("Key swap: one-time binding reset failed (bindings left as they are): " + e.Message);
+            }
+        }
+
+        // SettingsRoot.Controls.Keybindings.General.Camera* -> SetValue(DefaultValue) x4 -> SaveAll.
+        static bool ResetDataLayerToDefaults()
+        {
+            try
+            {
+                var rootT = AccessTools.TypeByName("Kingmaker.Settings.SettingsRoot");
+                if (rootT == null) return false;
+                object controls = null;
+                try { controls = AccessTools.Property(rootT, "Controls")?.GetValue(null, null); } catch { }
+                if (controls == null) { try { AccessTools.Method(rootT, "EnsureInitialized")?.Invoke(null, null); controls = AccessTools.Property(rootT, "Controls")?.GetValue(null, null); } catch { } }
+                if (controls == null) return false;
+                object general = Traverse.Create(controls).Field("Keybindings").Field("General").GetValue<object>();
+                if (general == null) return false;
+
+                bool allOk = true;
+                for (int i = 0; i < 4; i++)
+                {
+                    object entity = Traverse.Create(general).Field(_fieldOrder[i]).GetValue<object>();
+                    if (entity == null) { allOk = false; DescribeEntityOnce(null, "entity null: " + _fieldOrder[i]); continue; }
+                    var et = entity.GetType();
+
+                    // Ladder 1: the ISettingsEntity contract (Kingmaker.Settings.Interfaces - probed from
+                    // the actual assembly): ResetToDefault + ConfirmTempValue, invoked through the
+                    // INTERFACE MethodInfos so explicit implementations dispatch correctly, then verified
+                    // with the contract's own CurrentValueIsNotDefault.
+                    bool done = false;
+                    try
+                    {
+                        var ifaceT = AccessTools.TypeByName("Kingmaker.Settings.Interfaces.ISettingsEntity");
+                        if (ifaceT != null && ifaceT.IsAssignableFrom(et))
+                        {
+                            InvokeWithDefaults(ifaceT.GetMethod("ResetToDefault"), entity);
+                            InvokeWithDefaults(ifaceT.GetMethod("ConfirmTempValue"), entity);
+                            var notDef = ifaceT.GetMethod("CurrentValueIsNotDefault");
+                            done = notDef == null || !(bool)notDef.Invoke(entity, null);
+                        }
+                    }
+                    catch { }
+                    if (done) continue;
+
+                    // Ladder 2: default value + a set method, by candidate names.
+                    object def = null;
+                    try { def = Traverse.Create(entity).Property("DefaultValue").GetValue<object>(); } catch { }
+                    if (def == null) { try { def = Traverse.Create(entity).Field("m_DefaultValue").GetValue<object>(); } catch { } }
+                    if (def == null) { try { def = AccessTools.Method(et, "GetDefaultValue")?.Invoke(entity, null); } catch { } }
+                    MethodInfo setter = null;
+                    if (def != null)
+                        foreach (var nm in new[] { "SetValueAndConfirm", "SetValueAndSave", "SetValue" })
+                        {
+                            foreach (var m in et.GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+                                if (m.Name == nm && m.GetParameters().Length == 1) { setter = m; break; }
+                            if (setter != null) break;
+                        }
+                    if (def == null || setter == null) { allOk = false; DescribeEntityOnce(entity, "no reset path"); continue; }
+                    try { setter.Invoke(entity, new[] { def }); } catch (Exception ex) { allOk = false; DescribeEntityOnce(entity, "setter threw: " + ex.GetType().Name); }
+                }
+
+                try
+                {
+                    var sc = AccessTools.TypeByName("Kingmaker.Settings.SettingsController");
+                    var save = sc == null ? null : AccessTools.Method(sc, "SaveAll");
+                    if (save == null) allOk = false;
+                    else
+                    {
+                        object target = save.IsStatic ? null : AccessTools.Field(sc, "s_Instance")?.GetValue(null);
+                        if (!save.IsStatic && target == null) allOk = false;
+                        else save.Invoke(target, null);
+                    }
+                }
+                catch { allOk = false; }
+                return allOk;
+            }
+            catch { return false; }
+        }
+
+        // One-time API self-description on a persistence failure: SettingsEntityKeyBindingPair lives in
+        // an assembly never probed (a TypeRef from Code.dll), so on the first failure log its ACTUAL
+        // member surface - turning the next field log into the exact spec for the fix.
+        // Invokes a method filling trailing parameters with sensible defaults (true for bools,
+        // declared defaults, else zero-values). No-op on null.
+        static void InvokeWithDefaults(MethodInfo m, object target)
+        {
+            if (m == null) return;
+            var ps = m.GetParameters();
+            var args = new object[ps.Length];
+            for (int p = 0; p < ps.Length; p++)
+                args[p] = ps[p].ParameterType == typeof(bool) ? (object)true
+                        : ps[p].HasDefaultValue ? ps[p].DefaultValue
+                        : ps[p].ParameterType.IsValueType ? Activator.CreateInstance(ps[p].ParameterType) : null;
+            m.Invoke(target, args);
+        }
+
+        static bool _described;
+        static void DescribeEntityOnce(object entity, string why)
+        {
+            if (_described) return;
+            _described = true;
+            try
+            {
+                if (entity == null) { Main.Log?.Log("Key swap: persistence failed (" + why + ")."); return; }
+                var et = entity.GetType();
+                var ms = new System.Collections.Generic.List<string>();
+                foreach (var m in et.GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+                    if (m.Name.IndexOf("Value", StringComparison.OrdinalIgnoreCase) >= 0 || m.Name.IndexOf("Default", StringComparison.OrdinalIgnoreCase) >= 0
+                        || m.Name.IndexOf("Reset", StringComparison.OrdinalIgnoreCase) >= 0 || m.Name.IndexOf("Confirm", StringComparison.OrdinalIgnoreCase) >= 0
+                        || m.Name.IndexOf("Save", StringComparison.OrdinalIgnoreCase) >= 0)
+                        ms.Add(m.Name + "/" + m.GetParameters().Length);
+                Main.Log?.Log("Key swap: persistence failed (" + why + ") on " + et.FullName + " - members: " + string.Join(", ", ms.ToArray()) + ".");
+            }
+            catch { }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // Dialogue listener pin. Both games slave the Wwise audio listener to the camera every frame via
+    // Kingmaker.Sound.AudioListenerPositionController.LateUpdate - its whole body copies its own
+    // transform onto m_Listener (RT even ships FreezeXRotation, pinning listener pitch to the stock
+    // 78.068 tactical angle: the mix is authored around the default camera). Character dialogue VO is
+    // posted as 3D Wwise events on the SPEAKER's GameObject (VoiceOverPlayer / LocalizedString.
+    // PlayCueVoiceOver branch between a 2D object and the speaker's gameObject), so with a view applied
+    // the camera-to-speaker distance - and therefore the line's volume - changes with every view
+    // switch. Fix: while a view is active during dialogue, capture the listener pose ONCE with the
+    // mod's total applied world offset subtracted (Main.LastFocusOffsetWorld => the game's own computed
+    // camera pose at that instant) and hold it static for the conversation, so volume cannot change
+    // with mid-dialogue view switches and the baseline is the stock pose, not the mod's. Release =
+    // simply stop overwriting; the controller re-slaves the listener next frame. Acknowledged
+    // residual: the reconstructed pose still carries the view's pinned ZOOM, so dialogues entered from
+    // different views start from slightly different baselines - undoing zoom would need the rig's
+    // zoom->distance internals and is not worth the fragility. This postfix runs after the controller's
+    // own write, so reading the listener transform sees the live camera pose of this frame.
+    [HarmonyPatch]
+    static class DialogueListenerPin_Patch
+    {
+        static MethodBase TargetMethod()
+        {
+            var t = AccessTools.TypeByName("Kingmaker.Sound.AudioListenerPositionController");
+            return t == null ? null : AccessTools.Method(t, "LateUpdate");
+        }
+        static bool Prepare() => TargetMethod() != null;
+
+        static System.Reflection.FieldInfo _listenerField;
+        static bool _held, _logged;
+        static Vector3 _heldPos;
+        static Quaternion _heldRot;
+
+        static void Postfix(object __instance)
+        {
+            try
+            {
+                if (!Main.DialogueListenerPinActive()) { _held = false; return; }
+                if (_listenerField == null)
+                {
+                    _listenerField = AccessTools.Field(__instance.GetType(), "m_Listener");
+                    if (_listenerField == null) return;              // fail open: stock listener behaviour
+                }
+                var listener = _listenerField.GetValue(__instance) as Component;
+                if (listener == null) { _held = false; return; }     // Unity alive check
+                var lt = listener.transform;
+                if (!_held)
+                {
+                    _held = true;
+                    _heldPos = lt.position - Main.LastFocusOffsetWorld;   // the game's own camera pose this frame
+                    _heldRot = lt.rotation;
+                    if (!_logged)
+                    {
+                        _logged = true;
+                        Main.Log?.Log("Dialogue listener pin: holding the audio listener at the stock camera pose during conversations (view offsets removed).");
+                    }
+                }
+                lt.SetPositionAndRotation(_heldPos, _heldRot);
+            }
+            catch { _held = false; }
         }
     }
 

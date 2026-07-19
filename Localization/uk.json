@@ -84,6 +84,15 @@
     "On entering combat, switch to:": "Під час входу в бій перемкнути на:",
     "On leaving combat, switch to:": "Після завершення бою перемкнути на:",
     "– fires once as combat begins or ends; a chosen view that isn't saved is skipped. Space combat (Rogue Trader) is not covered.": "– спрацьовує один раз на початку або в кінці бою; незбережений вигляд пропускається. Космічний бій (Rogue Trader) не підтримується.",
-    "In mouselook, hide the hover highlight on the character you control": "У режимі mouselook приховувати підсвічування наведення на керованого персонажа"
+    "In mouselook, hide the hover highlight on the character you control": "У режимі mouselook приховувати підсвічування наведення на керованого персонажа",
+    "Steady dialogue volume (hold the audio listener during conversations)": "Стабільна гучність діалогів (фіксувати аудіослухача під час розмов)",
+    "WASD pans the camera  – bypasses the WASD Movement mod on this view so the keys fall through to the game's own camera panning": "WASD переміщує камеру  – обходить мод WASD Movement у цьому вигляді, щоб клавіші працювали як штатне переміщення камери",
+    "On Vanilla, WASD pans the camera (bypasses the WASD Movement mod)": "У режимі Оригінал WASD переміщує камеру (обхід мода WASD Movement)",
+    "swap move ↔ rotate keys  – the camera pan-left/right and rotate-left/right keys trade places (crossed: A/D rotate, Q/E pan at default bindings); the game's key bindings are untouched": "поміняти клавіші руху ↔ обертання  – клавіші зсуву камери ліворуч/праворуч та обертання ліворуч/праворуч міняються місцями (навхрест: A/D – обертання, Q/E – зсув за стандартних призначень); призначення гри не змінюються",
+    "On Vanilla, swap move ↔ rotate keys (crossed; bindings untouched)": "У режимі Оригінал поміняти рух ↔ обертання (навхрест; призначення не зачеплені)",
+    "Dialogue": "Діалог",
+    "framing, steady voice volume": "кадрування, стабільна гучність голосу",
+    "the game's own camera": "штатна камера гри",
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "Межі зуму задаються для кожного вигляду – у блоці вигляду та в розділі Оригінал вище."
   }
 }
