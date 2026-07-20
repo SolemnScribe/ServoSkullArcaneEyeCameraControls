@@ -503,6 +503,7 @@ namespace ServoSkullCameraControls
         static bool OnToggle(UnityModManager.ModEntry modEntry, bool value)
         {
             Active = value;
+            _combatForcedVanilla = false;
             if (!value)
             {
                 RestoreOccluderClip();   // mod disabled in UMM: re-register any occlusion-fade targets we were holding off
@@ -776,13 +777,14 @@ namespace ServoSkullCameraControls
             catch { return false; }
         }
         static System.Reflection.PropertyInfo _combatPlayerProp;
+        internal static bool _combatForcedVanilla;     // true while auto-combat holds us in vanilla mode; blocks the per-frame CaptureVanillaState from overwriting with combat-camera values
 
         static void ApplyAutoCombatView(int view, string reason)
         {
             // Same entry as the toggle key; a solid-walls/map/hard-bind standdown still governs when framing moves.
-            if (view == 0) { ApplyVanilla(); }
-            else if (view == 1 && settings.View1 != null && settings.View1.IsSet) { ApplyView(settings.View1); _activeView = 1; }
-            else if (view == 2 && settings.View2 != null && settings.View2.IsSet) { ApplyView(settings.View2); _activeView = 2; }
+            if (view == 0) { ApplyVanilla(); _combatForcedVanilla = true; }
+            else if (view == 1 && settings.View1 != null && settings.View1.IsSet) { ApplyView(settings.View1); _activeView = 1; _combatForcedVanilla = false; }
+            else if (view == 2 && settings.View2 != null && settings.View2.IsSet) { ApplyView(settings.View2); _activeView = 2; _combatForcedVanilla = false; }
             else { Log?.Log("Auto view on " + reason + ": target view " + view + " is not saved; leaving the camera as-is."); return; }
             Log?.Log("Auto view on " + reason + ": switched to " + (view == 0 ? "Vanilla" : "View " + view) + ".");
         }
@@ -1488,6 +1490,7 @@ namespace ServoSkullCameraControls
         static void ToggleViews()
         {
             if (settings == null) return;
+            _combatForcedVanilla = false;   // any manual toggle re-enables the per-frame vanilla capture
 
             var ring = new List<int>(3);
             if (settings.CycleView1 && settings.View1 != null && settings.View1.IsSet) ring.Add(1);
@@ -2645,7 +2648,9 @@ namespace ServoSkullCameraControls
 
                 // While no preset is active and we're in ordinary gameplay (not a scripted/map/cutscene shot),
                 // remember the live camera so a toggle to Vanilla can return here.
-                if (Main.ActiveViewNum == 0 && !hardBind && !InCutscene())
+                // Skipped while auto-combat-forced to vanilla: the game's own camera can change zoom/pitch during
+                // combat, and overwriting the baseline with those values causes progressive drift on each cycle.
+                if (Main.ActiveViewNum == 0 && !hardBind && !InCutscene() && !Main._combatForcedVanilla)
                     Main.CaptureVanillaState(__instance);
 
                 // Zoom: maintained every frame; reverted when off, hard-bound, during an in-dialogue scripted
