@@ -4043,7 +4043,7 @@ namespace ServoSkullCameraControls
     // absent (silent; also the WotR case, whose WASD mods are different projects).
     static class WasdBypass
     {
-        static bool _done, _installed;
+        static bool _done, _installed, _deepScanDone;
         static float _retryAt = 2f;   // give UMM time to finish loading later mods
         static int _attempts;
 
@@ -4054,9 +4054,14 @@ namespace ServoSkullCameraControls
             _attempts++;
             // Cache-proof type resolution, three ladders (Harmony's TypeByName can snapshot the assembly
             // list on first use, and UMM loads WASDMovement AFTER us): (A) name-matched assembly GetType;
-            // (B) GetType on EVERY assembly regardless of name; (C) full GetTypes scan (survives partial
-            // ReflectionTypeLoadExceptions). Statuses feed the give-up line so one field log names any
-            // dead link.
+            // (B) GetType by full name on every assembly (a cheap manifest lookup); (C) full GetTypes
+            // scan surviving partial ReflectionTypeLoadExceptions. FIELD INCIDENT (1.38.0, WotR): ladder
+            // C on every attempt stalled a user WITHOUT the mod at the 88% load screen for 10-15 minutes
+            // - eight back-to-back GetTypes sweeps over the whole domain, with slow loader-exception
+            // unwinding on broken assemblies. Since the type is COMPILED INTO the WASDMovement assembly,
+            // a deep scan can only ever succeed when that assembly NAME was seen but GetType failed - so
+            // ladder C is gated on asmSeen AND runs at most once per session. The not-installed path is
+            // now a per-attempt name sweep costing microseconds. Statuses feed the give-up line.
             bool asmSeen = false, viaAsm = false, viaAny = false, viaScan = false;
             Type t = null;
             try
@@ -4066,6 +4071,7 @@ namespace ServoSkullCameraControls
                 {
                     try
                     {
+                        if (asm.IsDynamic) continue;
                         if (asm.GetName().Name == "WASDMovement")
                         {
                             asmSeen = true;
@@ -4075,18 +4081,20 @@ namespace ServoSkullCameraControls
                     }
                     catch { }
                 }
-                if (t == null)
+                if (t == null && asmSeen)
                 {
                     foreach (var asm in assemblies)
                     {
-                        try { t = asm.GetType("WASDMovement.Main"); if (t != null) { viaAny = true; break; } }
+                        try { if (asm.IsDynamic) continue; t = asm.GetType("WASDMovement.Main"); if (t != null) { viaAny = true; break; } }
                         catch { }
                     }
                 }
-                if (t == null)
+                if (t == null && asmSeen && !_deepScanDone)
                 {
+                    _deepScanDone = true;   // expensive: once per session, and only when the assembly name exists
                     foreach (var asm in assemblies)
                     {
+                        if (asm.IsDynamic) continue;
                         Type[] types = null;
                         try { types = asm.GetTypes(); }
                         catch (ReflectionTypeLoadException rtle) { types = rtle.Types; }
