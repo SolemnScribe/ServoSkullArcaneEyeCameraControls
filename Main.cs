@@ -3889,7 +3889,10 @@ namespace ServoSkullCameraControls
             if (!__0)
             {
                 // The game is retracting a hover; if it is the one we were suppressing, forget the belief.
-                if (_gameHoverBelief != null && ReferenceEquals(__instance, _gameHoverBelief)) _gameHoverBelief = null;
+                // _selfWrite: our OWN engage-edge clear also lands here - without the guard it erased the
+                // belief recorded one line earlier, silently defeating the release-edge restore (found
+                // during the Xenazia crash investigation; a real bug independent of the crash).
+                if (!_selfWrite && _gameHoverBelief != null && ReferenceEquals(__instance, _gameHoverBelief)) _gameHoverBelief = null;
                 return true;                                     // never skip the un-highlight
             }
             if (!Main.SuppressControlledUnitHover()) return true;
@@ -3910,7 +3913,7 @@ namespace ServoSkullCameraControls
         // swallowed) and record the belief. On the RELEASE edge, write TRUE back to a believed-hovered
         // view that is still alive - materialising exactly the state the game already held, no raycast
         // or hover re-derivation involved. Called once per frame from OnUpdate.
-        static bool _edgeLast;
+        static bool _edgeLast, _selfWrite;
         static Component _gameHoverBelief;
         static MethodBase _setter;
         static System.Reflection.MethodInfo _mouseHighlightedGet, _selViewGet;
@@ -3927,18 +3930,24 @@ namespace ServoSkullCameraControls
                 if (s)
                 {
                     // Engage: clear a stale highlight on the controlled character and remember the belief.
+                    // Step-logged (support-grade): a field CTD was reported at exactly this edge - the log's
+                    // last line then names the failing step (the §7.6 instrument doctrine).
                     object view = ControlledView();
                     var c = view as Component;
-                    if (c == null) return;                       // includes Unity-dead
+                    if (c == null) { Main.Log?.Log("Hover gate edge: engage - no controlled view."); return; }
                     if (_mouseHighlightedGet == null)
                         _mouseHighlightedGet = FindGetterUpHierarchy(_setter.DeclaringType, "MouseHighlighted");
                     bool lit = false;
                     if (_mouseHighlightedGet != null)
                         try { lit = (bool)_mouseHighlightedGet.Invoke(view, null); } catch { }
+                    Main.Log?.Log("Hover gate edge: engage - view=" + view.GetType().Name + " lit=" + lit + (lit ? " - clearing..." : "."));
                     if (lit)
                     {
                         _gameHoverBelief = c;
+                        _selfWrite = true;
                         try { _setter.Invoke(view, new object[] { false }); } catch { }
+                        finally { _selfWrite = false; }
+                        Main.Log?.Log("Hover gate edge: engage clear done.");
                     }
                 }
                 else
@@ -3946,8 +3955,12 @@ namespace ServoSkullCameraControls
                     // Release: restore the highlight the game believed in (hover never actually ended).
                     var c = _gameHoverBelief;
                     _gameHoverBelief = null;
+                    Main.Log?.Log("Hover gate edge: release - restore=" + (c != null) + ".");
                     if (c != null)                               // Unity alive check
+                    {
                         try { _setter.Invoke(c, new object[] { true }); } catch { }
+                        Main.Log?.Log("Hover gate edge: release restore done.");
+                    }
                 }
             }
             catch { }

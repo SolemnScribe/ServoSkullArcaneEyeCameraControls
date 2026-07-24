@@ -3,7 +3,7 @@
   "DisplayName": "Servo-Skull Camera Controls",
   "Author": "SolemnScribe",
   "HomePage": "https://www.nexusmods.com/warhammer40kroguetrader/mods/457",
-  "Version": "1.38.1",
+  "Version": "1.38.2",
   "ManagerVersion": "0.25.0",
   "AssemblyName": "ServoSkullCameraControls.dll",
   "EntryMethod": "ServoSkullCameraControls.Main.Load"
