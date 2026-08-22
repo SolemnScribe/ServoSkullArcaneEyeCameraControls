@@ -119,7 +119,9 @@ namespace ServoSkullCameraControls
         public bool MouselookInvertY = true;
         public bool MouselookCrosshair = true;
         public bool MouselookHideOwnHover = true;   // in mouselook, hide the hover highlight/overtip on the controlled character (the centred cursor otherwise keeps them permanently lit)
-        public int FreeCursorKey = (int)KeyCode.LeftShift;
+        public int FreeCursorKey = (int)KeyCode.LeftAlt;   // default moved from Left Shift (game control-binding conflicts) in 1.39.0
+        public bool FreeCursorToggle = false;              // press-to-toggle instead of hold
+        public bool FreeCursorKeyMigrated = false;         // one-time: installs still on the old Left Shift default move to Left Alt
 
         // --- Off-screen character markers (the edge portrait pointers) ---
         public bool HideOffscreenUnitMarkers = true;
@@ -291,6 +293,8 @@ namespace ServoSkullCameraControls
         const float RecenterSettleSeconds = 0.2f;  // ...then stop once the focal has sat on the subject this long undisturbed
         static bool _loadPending;
         static int _applyView1Countdown;
+        static int _viewBeforeLoad;       // the view active when a mid-session load began (re-applied after the area seats)
+        static int _onLoadApplyTarget;    // which view the on-load countdown applies (1/2; 0 = none)
         static int _directControlCountdown;   // frames until the gamepad on-load direct-control flip is attempted
         static int _directControlRetries;     // remaining per-frame retries if the input layer isn't up yet at the flip tick
         static int _postDialogReapply;
@@ -308,7 +312,15 @@ namespace ServoSkullCameraControls
             // game starts as clean as a first load: the stale mouselook seat (it would drive a wrong pitch until
             // the on-load re-assert lands) and the vanilla capture (re-grab this session's stock camera on the
             // next ApplyView rather than keeping the previous session's). Also drop any in-flight on-load hold.
-            CameraRig_UpdateInternal_Patch.ResetMouselookSeat();
+            // Remember the active view and STAND DOWN STATE before the load lands: with a view still
+            // active through a mid-session load, the rig postfix dressed the NEW save's rig with the
+            // view's pitch/zoom from frame one, and the on-load re-capture then recorded the VIEW's pose
+            // as "vanilla" (field report: toggling back to Vanilla misplaced after loading a different
+            // save). Standing down lets the loaded save's true stock camera show and be captured; the
+            // remembered view is re-applied once the area seats - so a view also correctly persists
+            // across mid-session loads even without apply-on-load.
+            _viewBeforeLoad = _activeView;
+            StandDownStateOnly();
             _vanillaCaptured = false;
             _viewAssertActive = false;
             OccluderCamera.OnGameLoad();   // re-enable/forget held cameras across a load; rescan lands next frame if still suppressing
@@ -317,7 +329,16 @@ namespace ServoSkullCameraControls
         {
             if (!_loadPending) return;
             _loadPending = false;
-            if (settings != null && settings.ApplyView1OnLoad)
+            int target = 0;
+            if (settings != null)
+            {
+                if (settings.ApplyView1OnLoad && settings.View1.IsSet) target = 1;
+                else if (_viewBeforeLoad == 1 && settings.View1.IsSet) target = 1;
+                else if (_viewBeforeLoad == 2 && settings.View2 != null && settings.View2.IsSet) target = 2;
+            }
+            _viewBeforeLoad = 0;
+            _onLoadApplyTarget = target;
+            if (target != 0)
             {
                 _applyView1Countdown = ApplyView1DelayFrames;
                 _recenterActive = true; _recenterElapsed = 0f; _recenterSettled = 0f;
@@ -451,6 +472,12 @@ namespace ServoSkullCameraControls
                 settings.ZoomLimitsMigrated = true;
                 settings.Save(modEntry);
             }
+            if (!settings.FreeCursorKeyMigrated)   // one-time: the free-cursor default moved off Left Shift (control conflicts)
+            {
+                if (settings.FreeCursorKey == (int)KeyCode.LeftShift) settings.FreeCursorKey = (int)KeyCode.LeftAlt;
+                settings.FreeCursorKeyMigrated = true;
+                settings.Save(modEntry);
+            }
             try { Localization.Init(modEntry); }   // pick the language file matching the game's current locale
             catch (Exception eLoc) { Log?.Error("Load: Localization.Init threw (continuing in English): " + eLoc); }
             try { Compat.Init(); }                  // detect RT vs WotR reflection targets (logs the UI flavour)
@@ -544,12 +571,13 @@ namespace ServoSkullCameraControls
             if (_applyView1Countdown > 0)
             {
                 _applyView1Countdown--;
-                if (_applyView1Countdown == 0 && settings.ApplyView1OnLoad && settings.View1.IsSet)
+                if (_applyView1Countdown == 0 && _onLoadApplyTarget != 0 && settings != null)
                 {
+                    var tv = _onLoadApplyTarget == 2 ? settings.View2 : settings.View1;
                     _viewAssertActive = true; _viewAssertStuck = 0; _viewAssertElapsed = 0f;
-                    ApplyView(settings.View1);
-                    _activeView = 1;
-                    Log?.Log("Applying View 1 on game load...");
+                    ApplyView(tv);
+                    _activeView = _onLoadApplyTarget;
+                    Log?.Log("Applying View " + _onLoadApplyTarget + " on game load...");
                 }
             }
             else if (_viewAssertActive)
@@ -559,18 +587,19 @@ namespace ServoSkullCameraControls
                 // control, rather than a single write a slow restore could overwrite. Mouselook takes over only
                 // once we stop, from the seat we just set. Self-logs the settle time for on-machine confirmation.
                 _viewAssertElapsed += Time.unscaledDeltaTime;
-                _viewAssertStuck = ViewSeatHeld(settings.View1) ? _viewAssertStuck + 1 : 0;
+                var seatView = _onLoadApplyTarget == 2 ? settings.View2 : settings.View1;
+                _viewAssertStuck = ViewSeatHeld(seatView) ? _viewAssertStuck + 1 : 0;
                 bool tookControl = CameraRig_UpdateInternal_Patch.FollowerActive();
                 if (_viewAssertStuck >= ViewAssertStuckFrames || tookControl || _viewAssertElapsed >= ViewAssertMaxSeconds)
                 {
                     _viewAssertActive = false;
                     string why = tookControl ? "took control" : (_viewAssertStuck >= ViewAssertStuckFrames ? "settled" : "cap");
-                    Log?.Log("View 1 seated on load after " + _viewAssertElapsed.ToString("0.00") + "s (" + why + ").");
+                    Log?.Log("View " + (_onLoadApplyTarget == 0 ? 1 : _onLoadApplyTarget) + " seated on load after " + _viewAssertElapsed.ToString("0.00") + "s (" + why + ").");
                 }
                 else
                 {
-                    ApplyView(settings.View1);
-                    _activeView = 1;
+                    ApplyView(seatView);
+                    _activeView = _onLoadApplyTarget;
                 }
             }
 
@@ -789,9 +818,24 @@ namespace ServoSkullCameraControls
 
         static bool KeyDown(int k) => k != (int)KeyCode.None && Input.GetKeyDown((KeyCode)k);
 
+        static bool _freeCursorLatch;
+        static int _freeCursorFlipFrame = -1;
         static bool FreeCursorHeld()
-            => settings != null && settings.FreeCursorKey != (int)KeyCode.None
-               && Input.GetKey((KeyCode)settings.FreeCursorKey);
+        {
+            if (settings == null || settings.FreeCursorKey == (int)KeyCode.None) return false;
+            if (!settings.FreeCursorToggle)
+            {
+                _freeCursorLatch = false;
+                return Input.GetKey((KeyCode)settings.FreeCursorKey);
+            }
+            if (!MouselookActive) { _freeCursorLatch = false; return false; }    // the latch is a per-mouselook-session state
+            if (Input.GetKeyDown((KeyCode)settings.FreeCursorKey) && Time.frameCount != _freeCursorFlipFrame)
+            {
+                _freeCursorFlipFrame = Time.frameCount;                          // the helper runs several times a frame - flip once
+                _freeCursorLatch = !_freeCursorLatch;
+            }
+            return _freeCursorLatch;
+        }
 
         // The UMM manager window is an IMGUI overlay the game's UI state knows nothing about,
         // so mouselook must yield the cursor while it is open (to bind keys, tick views, etc.).
@@ -1021,6 +1065,32 @@ namespace ServoSkullCameraControls
             catch { return false; }
         }
 
+        // Sweep-free type resolution. AccessTools.TypeByName, on a MISS (or before reaching the hit),
+        // iterates GetTypes across the whole domain - loader-exception unwinding plus assembly-binding
+        // disk probes on broken third-party assemblies, which field-froze afflicted machines for minutes
+        // (the 1.38.1 load stall; the hover-gate toggle freeze). This walks assembly MANIFESTS only
+        // (asm.GetType = a name lookup, never GetTypes): microseconds on hit and on miss. THE RULE:
+        // any type lookup that can MISS, or that runs lazily during gameplay, must use this - reserve
+        // AccessTools.TypeByName for load-time lookups of names known to exist.
+        internal static Type SafeTypeByName(string name)
+        {
+            try
+            {
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        if (asm.IsDynamic) continue;
+                        var t = asm.GetType(name);
+                        if (t != null) return t;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return null;
+        }
+
         internal static void SetFloat(Traverse owner, string field, float val)
         {
             var f = owner.Field(field);
@@ -1088,12 +1158,33 @@ namespace ServoSkullCameraControls
             _gpPitchActive = false;
         }
 
+        // State-only stand-down: the STATE portions of ApplyVanilla with ZERO rig writes. Two callers:
+        // map entry (below) and NotifyGameLoad (mid-session save loads) - both are moments where the
+        // game is about to own or rebuild the camera and our values must not be treated as stock. The previous
+        // hand-off stamped the captured surface pose/zoom on the InMapMode RISING edge - which fires
+        // AFTER the game has begun building the map camera, so on slower machines the stamp landed on
+        // top of it: surface pitch flattened the orbital plane ("planet axes like a line"), the player's
+        // yaw rotated the map under the UI bar, and surface zoom scrolls left the map camera outside its
+        // own scroll range (mouse zoom clamped; "view your ship" recovers because it writes
+        // programmatically). Field evidence the map camera needs no help: entering via the bridge -
+        // identical player yaw, no stamp - always composes correctly. So on entry we release our state
+        // and write NOTHING. Watch item: if the original passive-leak "StarSystem pitch jump" ever
+        // resurfaces, the recorded fallback is a one-shot pitch-only m_TargetRotate.x write - never the
+        // full stamp, never transform.rotation, never zoom.
+        static void StandDownStateOnly()
+        {
+            _activeView = 0;
+            MouselookActive = false;
+            CameraRig_UpdateInternal_Patch.ResetMouselookSeat();
+            _gpPitchActive = false;
+        }
+
         // System/sector map handoff. Entering the Koronus Expanse sector map (GlobalMap) or an in-system map
-        // (StarSystem) hands the shared rig to the game's own map camera, but a passive stand-down can leave the
-        // active view's pitch/zoom sitting on the rig (the "StarSystem pitch jump"). So on the way in we actively
-        // drop to the stock camera, remember which view was active, and re-apply it once we're back in ordinary
-        // surface gameplay. The restore is gated on PlainSurface(), not merely "not in map mode", so a cutscene
-        // played over the map (CutsceneGlobalMap flips InMapMode off) can't trigger a premature re-stamp.
+        // (StarSystem) hands the shared rig to the game's own map camera. On the way in we release our
+        // state WITHOUT touching the rig (StandDownForMap - see its comment for the race this replaced),
+        // remember which view was active, and re-apply it once we're back in ordinary surface gameplay.
+        // The restore is gated on PlainSurface(), not merely "not in map mode", so a cutscene played over
+        // the map (CutsceneGlobalMap flips InMapMode off) can't trigger a premature re-stamp.
         static void TickMapViewHandoff()
         {
             bool inMap = CameraRig_UpdateInternal_Patch.InMapMode();
@@ -1106,7 +1197,7 @@ namespace ServoSkullCameraControls
                     _viewBeforeMap = _activeView;
                     if (_activeView != 0)
                     {
-                        ApplyVanilla();          // map opens on the stock camera, not the view's framing
+                        StandDownStateOnly();    // state only - the map camera fully owns the rig from here
                         _mapRestorePending = true;
                     }
                 }
@@ -1365,8 +1456,8 @@ namespace ServoSkullCameraControls
         {
             if (_dcInit) return;
             _dcInit = true;
-            _dcLayerType = AccessTools.TypeByName("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer")
-                        ?? AccessTools.TypeByName("Kingmaker.UI._ConsoleUI.InputLayers.InGameLayer.InGameInputLayer");
+            _dcLayerType = Main.SafeTypeByName("Kingmaker.Code.UI.MVVM.View.Surface.InputLayers.SurfaceMainInputLayer")
+                        ?? Main.SafeTypeByName("Kingmaker.UI._ConsoleUI.InputLayers.InGameLayer.InGameInputLayer");
             if (_dcLayerType != null)
             {
                 _dcInstanceProp = AccessTools.Property(_dcLayerType, "Instance");   // RT static singleton; null on WotR (use CachedInputLayer)
@@ -1438,7 +1529,7 @@ namespace ServoSkullCameraControls
         {
             if (_ccInit) return;
             _ccInit = true;
-            _ccType = AccessTools.TypeByName("Kingmaker.UI.Pointer.ConsoleCursor");
+            _ccType = Main.SafeTypeByName("Kingmaker.UI.Pointer.ConsoleCursor");
             if (_ccType != null)
             {
                 _ccInstanceProp = AccessTools.Property(_ccType, "Instance");      // static singleton
@@ -1654,11 +1745,12 @@ namespace ServoSkullCameraControls
             settings.MouselookHideOwnHover = GUILayout.Toggle(settings.MouselookHideOwnHover, "     " + L("In mouselook, hide the hover highlight on the character you control"));
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
-            GUILayout.Label("     " + L("hold-to-free-cursor:"), GUILayout.Width(190f));
+            GUILayout.Label("     " + L("free-cursor key:"), GUILayout.Width(190f));
             GUILayout.Label(KeyName(settings.FreeCursorKey), GUILayout.Width(110f));
             if (GUILayout.Button(_bindingTarget == 5 ? L("press a key\u2026") : L("Bind"), GUILayout.Width(110f))) _bindingTarget = 5;
+            settings.FreeCursorToggle = GUILayout.Toggle(settings.FreeCursorToggle, L("toggle mode \u2013 press once to free, again to recapture"));
             GUILayout.EndHorizontal();
-            GUILayout.Label("     " + L("hold that key for a normal pointer; dialogue, menus, the global map and this panel free it automatically."));
+            GUILayout.Label("     " + L("hold that key for a normal pointer (or tick toggle mode); dialogue, menus, the global map and this panel free it automatically."));
 
             GUILayout.Space(14f);
 
@@ -2651,10 +2743,24 @@ namespace ServoSkullCameraControls
                 // Zoom: maintained every frame; reverted when off, hard-bound, during an in-dialogue scripted
                 // shot (CameraCutsceneActive is dialogue-only, so this doesn't touch pure cutscenes), and in pure
                 // cutscenes only when the pause-in-cutscenes toggle is on - that control stays authoritative there.
-                bool zoomRevert = !Main.ActiveZoomLimitsEnabled() || hardBind
-                                || CutsceneCameraGate.CameraCutsceneActive()
-                                || (s.ZoomPauseInCutscenes && inCut);
-                ZoomLimits.Apply(__instance, restoreDefault: zoomRevert);
+                // While a system/sector map is open the map camera owns zoom completely: neither extend
+                // nor revert-stamp it (the per-frame restoreDefault write raced/stomped the map camera's
+                // own scroll bounds - the "stuck extremely close" report). Normal behaviour resumes on
+                // the first non-map frame.
+                if (!InMapMode())
+                {
+                    // InDialogMode: WotR runs conversations in GameModeType.Dialog - not cutscene mode,
+                    // not hard-bind, and CameraCutsceneActive is the RT dialogue-shot gate that never
+                    // fires on Wrath. Without this check the extension stayed live through every WotR
+                    // dialogue, remapping the scene's authored zoom outward ("zooms out VERY far" field
+                    // report). RT-inert: RT conversations never set Dialog mode (they yield via the
+                    // cutscene path), so RT DialogZoom/framing behaviour is untouched.
+                    bool zoomRevert = !Main.ActiveZoomLimitsEnabled() || hardBind
+                                    || CutsceneCameraGate.CameraCutsceneActive()
+                                    || InDialogMode()
+                                    || (s.ZoomPauseInCutscenes && inCut);
+                    ZoomLimits.Apply(__instance, restoreDefault: zoomRevert);
+                }
 
                 // Pitch range: widen the native drag clamp (only affects manual drag). Stand it down under any
                 // scripted camera control too - the clamp otherwise forces an authored low-angle shot back up.
@@ -2665,8 +2771,11 @@ namespace ServoSkullCameraControls
                 // camera flattened. Stood down while any scripted shot owns the camera (hard-bind, cutscene mode,
                 // or an in-dialogue camera command) and re-asserted the instant it hands back. Mouselook views and
                 // View 1 on a pad are excluded inside the helper.
+                // InDialogMode: same WotR-dialogue gap as the zoom gate above - without it the lock
+                // stamped the view's tilt against the dialogue camera every frame ("locks the screen"
+                // field report). RT-inert for the same reason.
                 float lockPitch = Main.ActiveViewLockedPitch();
-                if (!float.IsNaN(lockPitch) && !hardBind && !InCutscene() && !CutsceneCameraGate.CameraCutsceneActive())
+                if (!float.IsNaN(lockPitch) && !hardBind && !InCutscene() && !CutsceneCameraGate.CameraCutsceneActive() && !InDialogMode())
                 {
                     var lockTr = t.Field("m_TargetRotate");
                     Vector3 lr = lockTr.GetValue<Vector3>();
@@ -2808,7 +2917,14 @@ namespace ServoSkullCameraControls
                 // can't make the focus jump. Re-applied every frame so the unit-follower recentering can't
                 // wipe it when you move with WASD.
                 bool inDialog = UIGate.HasDialog() || InDialogMode();
-                DialogFramingMode dmode = s.DialogFraming;
+                // Dialogue framing is an RT feature, designed around RT's near-static conversation camera.
+                // The shared inDialog predicate accidentally engaged it on WotR too - whose dialogue camera
+                // PANS between speakers - so the per-frame offset (View 1's 25.5u dolly especially) fought
+                // the scripted framing through every Wrath conversation: the "zooms out VERY far" and
+                // "locks the screen" field reports. On WotR a conversation always takes the Off path
+                // (offsets pause via the gate; the camera is fully the game's), exactly like the zoom and
+                // pitch stand-downs added alongside. Out of dialogue, WotR framing is unchanged.
+                DialogFramingMode dmode = Compat.Ui == Compat.UiKind.RT ? s.DialogFraming : DialogFramingMode.Off;
                 bool framingDialogExempt = inDialog && dmode != DialogFramingMode.Off;   // keep the offset through this conversation
                 float ph = Main.ActiveViewPivotHeight();
                 float shoulder = Main.ActiveViewShoulder();
@@ -3325,8 +3441,8 @@ namespace ServoSkullCameraControls
             try
             {
                 // Shape 1 (ToyBox 1.x)
-                var ec = AccessTools.TypeByName("ToyBox.EnhancedCamera");
-                var stA = AccessTools.TypeByName("ToyBox.Settings");
+                var ec = Main.SafeTypeByName("ToyBox.EnhancedCamera");
+                var stA = Main.SafeTypeByName("ToyBox.Settings");
                 if (ec != null && stA != null)
                 {
                     var p = AccessTools.Property(ec, "Settings");
@@ -3340,14 +3456,14 @@ namespace ServoSkullCameraControls
                 }
 
                 // Shape 2 (ToyBox 2.0 rewrite)
-                var gs = AccessTools.TypeByName("ToyBox.Infrastructure.GeneralSettings");
+                var gs = Main.SafeTypeByName("ToyBox.Infrastructure.GeneralSettings");
                 if (gs != null)
                 {
                     // Only touch Settings once ToyBox says it is up (lazy JSON creation hazard).
                     bool ready = false;
                     try
                     {
-                        var tbMain = AccessTools.TypeByName("ToyBox.Main");
+                        var tbMain = Main.SafeTypeByName("ToyBox.Main");
                         var init = tbMain == null ? null : AccessTools.Property(tbMain, "SuccessfullyInitialized");
                         if (init != null) ready = init.GetValue(null, null) is bool b && b;
                         else
@@ -3995,8 +4111,12 @@ namespace ServoSkullCameraControls
                     _resolved = true;
                     try
                     {
-                        var sm = AccessTools.TypeByName("Kingmaker.UI.Selection.SelectionManagerBase")   // RT
-                              ?? AccessTools.TypeByName("SelectionManagerBase");                          // WotR (global namespace)
+                        // SafeTypeByName, NOT AccessTools.TypeByName: this runs lazily at the first
+                        // active use (the view toggle), and on WotR the RT name below is a guaranteed
+                        // miss - TypeByName's miss-sweep field-froze two users' machines for minutes
+                        // (reported as hard crashes; feature-off avoided it). See Main.SafeTypeByName.
+                        var sm = Main.SafeTypeByName("Kingmaker.UI.Selection.SelectionManagerBase")   // RT
+                              ?? Main.SafeTypeByName("SelectionManagerBase");                          // WotR (global namespace)
                         if (sm != null)
                         {
                             try { _smInstance = AccessTools.Property(sm, "Instance"); } catch { }

@@ -93,6 +93,9 @@
     "Dialogue": "对话",
     "framing, steady voice volume": "构图、稳定语音音量",
     "the game's own camera": "游戏自身的镜头",
-    "Zoom limits are set per view – in each view's block and under Vanilla above.": "缩放限制按视图设置 – 在各视图区块及上方“原版”中。"
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "缩放限制按视图设置 – 在各视图区块及上方“原版”中。",
+    "free-cursor key:": "释放光标按键：",
+    "toggle mode – press once to free, again to recapture": "切换模式 – 按一次释放，再按一次收回",
+    "hold that key for a normal pointer (or tick toggle mode); dialogue, menus, the global map and this panel free it automatically.": "按住该键可使用普通指针（或勾选切换模式）；对话、菜单、世界地图和此面板会自动释放。"
   }
 }

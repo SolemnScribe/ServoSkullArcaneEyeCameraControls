@@ -92,6 +92,9 @@
     "Dialogue": "Dialogue",
     "framing, steady voice volume": "framing, steady voice volume",
     "the game's own camera": "the game's own camera",
-    "Zoom limits are set per view – in each view's block and under Vanilla above.": "Zoom limits are set per view – in each view's block and under Vanilla above."
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "Zoom limits are set per view – in each view's block and under Vanilla above.",
+    "free-cursor key:": "free-cursor key:",
+    "toggle mode – press once to free, again to recapture": "toggle mode – press once to free, again to recapture",
+    "hold that key for a normal pointer (or tick toggle mode); dialogue, menus, the global map and this panel free it automatically.": "hold that key for a normal pointer (or tick toggle mode); dialogue, menus, the global map and this panel free it automatically."
   }
 }

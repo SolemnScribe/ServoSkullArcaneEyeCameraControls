@@ -93,6 +93,9 @@
     "Dialogue": "Dialogue",
     "framing, steady voice volume": "cadrage, volume de voix stable",
     "the game's own camera": "la caméra du jeu",
-    "Zoom limits are set per view – in each view's block and under Vanilla above.": "Les limites de zoom se règlent par vue – dans le bloc de chaque vue et sous Vanilla ci-dessus."
+    "Zoom limits are set per view – in each view's block and under Vanilla above.": "Les limites de zoom se règlent par vue – dans le bloc de chaque vue et sous Vanilla ci-dessus.",
+    "free-cursor key:": "touche curseur libre :",
+    "toggle mode – press once to free, again to recapture": "mode bascule – une pression libère, une autre recapture",
+    "hold that key for a normal pointer (or tick toggle mode); dialogue, menus, the global map and this panel free it automatically.": "maintenez cette touche pour un pointeur normal (ou cochez le mode bascule) ; dialogues, menus, carte du monde et ce panneau le libèrent automatiquement."
   }
 }
