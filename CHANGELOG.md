@@ -7,6 +7,17 @@ versioning](https://semver.org).
 is the first public release since `1.23.0` and rolls all of them up.
 
 
+## [1.40.0]
+
+### Added
+- **The view toggle can be bound to the D-pad (gamepad).** Unity's input reports the XInput D-pad as
+  axes rather than buttons, which is why binding it was previously impossible. The bind scan now also
+  listens through Rewired - the input middleware both games ship - which exposes the D-pad as ordinary
+  buttons. Bind as usual and press any D-pad direction (or any other pad button); the bound name shows
+  Rewired's own label (for example "D-Pad Up (pad)"). Existing binds are untouched, and if Rewired is
+  ever unavailable the previous behaviour applies unchanged.
+
+
 ## [1.39.0]
 
 ### Added

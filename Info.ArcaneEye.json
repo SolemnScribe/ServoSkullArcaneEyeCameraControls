@@ -3,7 +3,7 @@
   "DisplayName": "Arcane Eye Camera Controls",
   "Author": "SolemnScribe",
   "HomePage": "https://www.nexusmods.com/pathfinderwrathoftherighteous/mods/1042",
-  "Version": "1.39.0",
+  "Version": "1.40.0",
   "ManagerVersion": "0.25.0",
   "AssemblyName": "ArcaneEyeCameraControls.dll",
   "EntryMethod": "ServoSkullCameraControls.Main.Load"

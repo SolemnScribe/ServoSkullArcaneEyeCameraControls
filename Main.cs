@@ -93,7 +93,7 @@ namespace ServoSkullCameraControls
         public int SetView1Key = (int)KeyCode.Keypad7;
         public int SetView2Key = (int)KeyCode.Keypad9;
         public int ToggleKey   = (int)KeyCode.CapsLock;
-        public int GamepadToggleKey = (int)KeyCode.JoystickButton4;   // gamepad view-toggle; defaults to the Xbox Left Bumper (LB). The D-pad reports as an axis, not a button, so Unity's input can't bind it here; rebindable to any pad button in settings
+        public int GamepadToggleKey = (int)KeyCode.JoystickButton4;   // gamepad view-toggle; defaults to the Xbox Left Bumper (LB). Values >= Main.RewiredBindBase are Rewired button indices - since 1.40.0 the bind scan also listens through Rewired, which exposes the D-pad as ordinary buttons (Unity's KeyCodes cannot see it)
         public bool GamepadInvertPitch = false;  // invert the right-stick pitch on a pad. Off = stick up looks up; on flips it. Needs its own flag, not MouselookInvertY: the stick vector's Y sign is already opposite Unity's Mouse Y, so the same factor reads the other way round on a pad
         public float GamepadDeadzone = 0.12f;    // right-stick centre deadzone for the mod's own reads (pitch-hold, yaw takeover); the game's native input keeps its own calibration. Values above it are remapped to a smooth 0-1 so there's no response step at the edge
         public float GamepadYawSpeedMult = 1f;   // right-stick turn-speed multiplier on a pad. At 1.0 the game's native turn is untouched; any other value has the mod take over stick-X yaw at (mult x GamepadYawRate) deg/s and suppress the native turn so the two don't stack. Contributed by @saghm (NexusMods/GitHub), reworked
@@ -816,7 +816,15 @@ namespace ServoSkullCameraControls
             Log?.Log("Auto view on " + reason + ": switched to " + (view == 0 ? "Vanilla" : "View " + view) + ".");
         }
 
-        static bool KeyDown(int k) => k != (int)KeyCode.None && Input.GetKeyDown((KeyCode)k);
+        // Bind values >= RewiredBindBase are Rewired Joystick button indices (D-pad support - see
+        // RewiredPad); below it they are ordinary Unity KeyCodes. One int, no settings migration.
+        internal const int RewiredBindBase = 10000;
+
+        static bool KeyDown(int k)
+        {
+            if (k >= RewiredBindBase) return RewiredPad.ButtonDown(k - RewiredBindBase);
+            return k != (int)KeyCode.None && Input.GetKeyDown((KeyCode)k);
+        }
 
         static bool _freeCursorLatch;
         static int _freeCursorFlipFrame = -1;
@@ -1611,6 +1619,14 @@ namespace ServoSkullCameraControls
                     return;
                 }
             }
+            // Rewired capture: sees the D-pad (and every other pad button) that Unity's KeyCodes cannot.
+            int rb = RewiredPad.ScanButtonDown();
+            if (rb >= 0)
+            {
+                settings.GamepadToggleKey = RewiredBindBase + rb;
+                settings.Save(ModEntry);
+                _bindingTarget = 0;
+            }
         }
 
         // ---- GUI ----
@@ -1938,7 +1954,11 @@ namespace ServoSkullCameraControls
             e.Use();
         }
 
-        static string KeyName(int k) => k == (int)KeyCode.None ? "(none)" : ((KeyCode)k).ToString();
+        static string KeyName(int k)
+        {
+            if (k >= RewiredBindBase) return RewiredPad.ButtonName(k - RewiredBindBase);
+            return k == (int)KeyCode.None ? "(none)" : ((KeyCode)k).ToString();
+        }
 
         static float Snap(float value, float step) => Mathf.Round(value / step) * step;
 
@@ -4158,6 +4178,109 @@ namespace ServoSkullCameraControls
                 catch { return false; }
             }
             catch { return false; }                              // fail open: stock hover
+        }
+    }
+
+
+    // Reflected bridge into the game's own Rewired input stack (Rewired_Core ships with BOTH games -
+    // probed in the assemblies). Purpose: the D-pad. Unity's legacy input surfaces the XInput D-pad as
+    // axes 6/7 - KeyCode.JoystickButtonN never fires for it - but Rewired normalises controller hats
+    // into ordinary BUTTON elements on its Joystick objects, so binding through Rewired sees the D-pad
+    // as four plain buttons. Note the design difference from the rejected saghm-era variant: this reads
+    // raw Joystick button elements, never Rewired ACTION ids (those are game-config-specific and were
+    // the unverifiable part). Everything is fail-open: any gap returns none and the KeyCode bind path
+    // behaves exactly as before. Resolution is SafeTypeByName throughout (the sweep rule).
+    static class RewiredPad
+    {
+        static bool _resolved;
+        static System.Reflection.PropertyInfo _controllers, _joysticks, _buttonCount, _buttons;
+        static System.Reflection.MethodInfo _getButtonDown;
+
+        static void Resolve()
+        {
+            if (_resolved) return;
+            _resolved = true;
+            try
+            {
+                var reInput = Main.SafeTypeByName("Rewired.ReInput");
+                var controller = Main.SafeTypeByName("Rewired.Controller");
+                if (reInput == null || controller == null) return;
+                _controllers = AccessTools.Property(reInput, "controllers");
+                var helper = _controllers == null ? null : _controllers.PropertyType;
+                _joysticks = helper == null ? null : AccessTools.Property(helper, "Joysticks");
+                _buttonCount = AccessTools.Property(controller, "buttonCount");
+                _buttons = AccessTools.Property(controller, "Buttons");
+                _getButtonDown = AccessTools.Method(controller, "GetButtonDown", new[] { typeof(int) });
+            }
+            catch { }
+        }
+
+        static System.Collections.IEnumerable Joysticks()
+        {
+            Resolve();
+            if (_controllers == null || _joysticks == null) return null;
+            try
+            {
+                var helper = _controllers.GetValue(null, null);
+                return helper == null ? null : _joysticks.GetValue(helper, null) as System.Collections.IEnumerable;
+            }
+            catch { return null; }
+        }
+
+        // First pad button pressed this frame across all joysticks, or -1 (the bind scan while armed).
+        internal static int ScanButtonDown()
+        {
+            var joys = Joysticks();
+            if (joys == null || _getButtonDown == null || _buttonCount == null) return -1;
+            try
+            {
+                foreach (var joy in joys)
+                {
+                    int n = (int)_buttonCount.GetValue(joy, null);
+                    for (int i = 0; i < n; i++)
+                        if ((bool)_getButtonDown.Invoke(joy, new object[] { i })) return i;
+                }
+            }
+            catch { }
+            return -1;
+        }
+
+        // Edge-poll for a bound Rewired button index (any joystick).
+        internal static bool ButtonDown(int index)
+        {
+            var joys = Joysticks();
+            if (joys == null || _getButtonDown == null) return false;
+            try
+            {
+                foreach (var joy in joys)
+                    if ((bool)_getButtonDown.Invoke(joy, new object[] { index })) return true;
+            }
+            catch { }
+            return false;
+        }
+
+        // Friendly element name ("D-Pad Up") from the first joystick, best effort.
+        internal static string ButtonName(int index)
+        {
+            try
+            {
+                var joys = Joysticks();
+                if (joys != null && _buttons != null)
+                    foreach (var joy in joys)
+                    {
+                        var list = _buttons.GetValue(joy, null) as System.Collections.IList;
+                        if (list != null && index >= 0 && index < list.Count)
+                        {
+                            var el = list[index];
+                            var np = el == null ? null : AccessTools.Property(el.GetType(), "name");
+                            var nm = np == null ? null : np.GetValue(el, null) as string;
+                            if (!string.IsNullOrEmpty(nm)) return nm + " (pad)";
+                        }
+                        break;
+                    }
+            }
+            catch { }
+            return "Pad button " + index;
         }
     }
 
